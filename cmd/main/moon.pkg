@@ -1,0 +1,8 @@
+import {
+  "moonbitlang/async",
+  "liuhuo23/clickhouse-driver" @lib,
+}
+
+options(
+  "is-main": true,
+)
