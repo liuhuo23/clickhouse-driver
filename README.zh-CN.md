@@ -2,20 +2,17 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-MoonBit 实现的 ClickHouse 原生 TCP 协议驱动。
+MoonBit 实现的 ClickHouse **HTTP** 协议驱动——简单、跨平台、无状态。
 
 ## 概览
 
-- 原生协议（rev 54429），兼容 ClickHouse 20.x – 23.x
-- 完整类型支持：`UInt/Int 8–256`、`Float32/64`、`Bool`、`String`、
-  `FixedString(N)`、`Date/Date32/DateTime/DateTime64`、`Decimal(P,S)`、
-  `UUID`、`IPv4/IPv6`、`Enum8/16`、`Nullable(T)`、`Array(T)`、`Tuple(...)`、
-  `Map(K,V)`、`LowCardinality(T)`、`SimpleAggregateFunction(func,T)`
-- 发送 `Client::Ping` 健康检查并解析 `Server::Pong`
-- 通过 MoonBit `try-catch` 进行错误处理，定义了 `DbError` suberror
-  （`ServerError` / `ConnectionError`）
-- 完整 DDL 支持（`CREATE` / `DROP` / `TRUNCATE`）
-- 开箱即用支持 `default` 和 `system` 数据库
+- 使用 ClickHouse 原生 HTTP 接口（默认端口 **8123**）
+- 响应以 **TabSeparatedWithNamesAndTypes** 解析，列名和类型自动返回，客户端无需手动类型映射
+- 单一统一 API：`execute_query(sql, params?)` 覆盖 SELECT、DDL、内联 VALUES INSERT
+- **命名参数替换** 通过 ClickHouse 的 `{name: Type}` 占位符语法实现——参数以 `param_<key>=<value>` URL 参数形式传入，由服务端（自动加引号、转义）替换
+- 通过 MoonBit `try-catch` 进行错误处理，定义了 `DbError` suberror（`ServerError` / `ConnectionError`）
+- 每次调用都建立短生命周期 HTTP 连接——无持久状态可泄漏，长时间空闲后无需重连
+- 兼容 ClickHouse 22.x+（HTTP 接口自 21.x 起稳定）
 
 ## 安装
 
@@ -31,8 +28,9 @@ import {
 
 ```text
 import {
-  "moonbitlang/async/socket",
+  "moonbitlang/async/http",
   "moonbitlang/core/buffer",
+  "moonbitlang/core/encoding/base64",
   "moonbitlang/core/encoding/utf8",
   "liuhuo23/clickhouse-driver" @lib,
 }
@@ -40,11 +38,12 @@ import {
 
 ## 快速开始
 
-```moonbit
+```moonbit nocheck
+///|
 async fn main {
   let conn = @lib.connect(
     host="127.0.0.1",
-    port=9000,
+    port=8123,
     user="default",
     password="",
     database="default",
@@ -55,25 +54,41 @@ async fn main {
   // 1. 健康检查
   conn.ping()
 
-  // 2. 执行查询
-  let result = conn.execute_query("SELECT id, name FROM users LIMIT 10")
+  // 2. SELECT —— 列名和类型自动返回
+  let result = conn.execute_query(
+    "SELECT id, name FROM users WHERE created_at > {lo: DateTime} LIMIT {n: UInt32}",
+    params=Map::from_array([
+      ("lo", "2024-01-01 00:00:00"),
+      ("n", "10"),
+    ]),
+  )
 
   // 3. 查看列信息
   for col in result.columns {
     println(col.name + " : " + col.type_)
   }
 
-  // 4. 遍历行
+  // 4. 遍历行（每格为字符串）
   for row in result.rows {
-    // row.values : Array[String]
     println(row.values)
   }
 
-  // 5. 转换为行 Map（每行 -> Map[列名 -> 值]）
-  let rows = result.to_map()
-  for m in rows {
+  // 5. 或转换为行 Map（按列名索引）
+  for m in result.to_map() {
     println(m["name"])
   }
+
+  // 6. INSERT（内联 VALUES，所有值来自 params）
+  ignore(
+    conn.execute_query(
+      "INSERT INTO users (id, name) VALUES " +
+      "({id: UInt32}, {name: String}), ({id2: UInt32}, {name2: String})",
+      params=Map::from_array([
+        ("id", "1"), ("name", "alice"),
+        ("id2", "2"), ("name2", "bob"),
+      ]),
+    ),
+  )
 }
 ```
 
@@ -81,7 +96,7 @@ async fn main {
 
 ### `connect`
 
-```moonbit
+```moonbit nocheck
 pub async fn connect(
   host~ : String,
   port~ : Int,
@@ -92,274 +107,231 @@ pub async fn connect(
 ) -> Connection
 ```
 
-建立 TCP 连接并完成 ClickHouse 握手。
+根据显式参数构造 `Connection` 配置。**不会**建立 TCP 连接——调用是无状态的，每次请求都会建立新的 HTTP 连接。
 
 | 参数         | 类型     | 说明                  |
 | ------------ | -------- | --------------------- |
 | `host`       | `String` | 服务器主机名或 IP     |
-| `port`       | `Int`    | TCP 端口（默认 9000） |
+| `port`       | `Int`    | HTTP 端口（默认 8123）|
 | `user`       | `String` | 用户名                |
 | `password`   | `String` | 密码                  |
 | `database`   | `String` | 默认数据库            |
-| `client_name`| `String` | 客户端标识            |
+| `client_name`| `String` | 通过 `X-ClickHouse-Client-Name` header 发送 |
 
 ### `Connection`
 
-```moonbit
-pub struct Connection { ... }
+```moonbit nocheck
+pub struct Connection {
+  host : String
+  port : Int
+  user : String
+  password : String
+  database : String
+  client_name : String
+}
 ```
+
+轻量级配置结构——没有持久 socket。每次调用都建立短生命周期 HTTP 连接并在返回时关闭。
 
 #### `Connection::ping`
 
-```moonbit
+```moonbit nocheck
 pub async fn ping(self : Connection) -> Unit raise
 ```
 
-发送 `Client::Ping` 包并等待 `Server::Pong`。轻量级健康检查，不执行查询。
+发送 `SELECT 1` 并期待 200 OK。轻量级健康检查。
 
 #### `Connection::execute_query`
 
-```moonbit
+```moonbit nocheck
 pub async fn execute_query(
   self : Connection,
   sql : String,
+  params? : Map[String, String] = {},
 ) -> ResultSet raise
 ```
 
-执行任意 SQL 语句（`SELECT`、`INSERT`、`UPDATE`、`DELETE`、DDL），返回解析结果。
-对于非 `SELECT` 语句，返回的 `rows` 通常为空。
+执行任意 SQL（SELECT、DDL、内联 VALUES INSERT 等），返回解析结果。
 
-可能抛出：
-- `DbError::ServerError(code, name, message)` — 服务器拒绝了查询
-  （语法错误、表不存在、权限不足等）
-- `DbError::ConnectionError(String)` — 协议 / I/O 错误
-- 底层网络 I/O 错误
+`params` 是可选的命名参数映射。每个条目会以 `param_<key>=<value>` URL 参数形式发送，ClickHouse 在服务端将值替换进匹配的 `{key: Type}` 占位符。值会被自动加引号并转义——直接传原始字符串即可。
+
+示例：
+
+```moonbit nocheck
+// 无参数
+let r = conn.execute_query("SELECT version()")
+
+// 单个参数
+let r = conn.execute_query(
+  "SELECT * FROM events WHERE id = {id: UInt64}",
+  params=Map::from_array([("id", "42")]),
+)
+
+// 多个参数，用于 INSERT VALUES
+ignore(conn.execute_query(
+  "INSERT INTO events (id, ts, msg) VALUES " +
+  "({id: UInt64}, {ts: DateTime}, {msg: String})",
+  params=Map::from_array([
+    ("id", "1"),
+    ("ts", "2024-01-01 00:00:00"),
+    ("msg", "hello"),
+  ]),
+))
+```
+
+抛出：
+- `DbError::ServerError(code, name, message)` — 服务端返回非 2xx HTTP 响应（语法错误、表不存在、权限被拒等）
+- `DbError::ConnectionError(String)` — 网络 / I/O 错误
+
+#### `Connection::cancel`
+
+```moonbit nocheck
+pub async fn cancel(self : Connection) -> Unit
+```
+
+HTTP 下为空操作。每个查询都是单次短生命周期请求，没有持久连接可发送 cancel 信号。保留此 API 以保持与之前 native TCP 设计的对称性。
 
 #### `Connection::close`
 
-```moonbit
+```moonbit nocheck
 pub fn close(self : Connection) -> Unit
 ```
 
-关闭底层 TCP 连接。配合 `defer` 使用：
+HTTP 下为空操作。配合 `defer` 使用以保持对称：
 
-```moonbit
+```moonbit nocheck
 let conn = @lib.connect(...)
 defer conn.close()
 ```
 
 ### `ResultSet`
 
-```moonbit
+```moonbit nocheck
+///|
 pub struct ResultSet {
   columns : Array[Column]
   rows : Array[Row]
 }
 ```
 
+当响应使用 `TabSeparatedWithNamesAndTypes`（`execute_query` 默认请求）时填充 `columns`。对于 DDL / INSERT 语句，该数组为空。
+
 #### `ResultSet::to_map`
 
-```moonbit
+```moonbit nocheck
 pub fn to_map(self : ResultSet) -> Array[Map[String, String]]
 ```
 
-将结果转换为行 Map 数组。每个元素是一个 `Map[String, String]`，
-键为列名，值为该单元格的字符串表示。
+将结果转换为按行映射数组。每个元素是 `Map[String, String]`，键为列名，值为该单元格的字符串表示。当 `columns` 为空时返回空数组。
 
-```moonbit
-let rows = result.to_map()
-for m in rows {
-  let name = m["name"]   // -> String?（如需非可选值请用 get_or_default）
+```moonbit nocheck
+for m in result.to_map() {
+  let name = m.get_or_default("name", "")
   println(name)
 }
 ```
 
 ### `Row`
 
-```moonbit
+```moonbit nocheck
+///|
 pub struct Row {
   values : Array[String]
 }
 ```
 
-单行数据。每个单元格是对应 ClickHouse 值的字符串表示
-（如 `"42"`、`"2025-01-01 00:00:00"`、`"NULL"`）。
+单行数据。每个单元格是对应 ClickHouse 值的字符串表示（如 `"42"`、`"2025-01-01 00:00:00"`、`"NULL"`）。
 
 ### `Column`
 
-```moonbit
+```moonbit nocheck
+///|
 pub struct Column {
   name : String
   type_ : String
 }
 ```
 
-列元数据。`type_` 是原始 ClickHouse 类型字符串，例如
-`"Nullable(Int64)"`、`"LowCardinality(String)"`、`"DateTime64(3)"`。
+从 `TabSeparatedWithNamesAndTypes` 解析的列元数据。`type_` 是原始 ClickHouse 类型字符串，如 `"UInt32"`、`"String"`、`"Nullable(Int64)"`。
 
 ## 异常处理
 
-```moonbit
+```moonbit nocheck
 try {
   conn.execute_query("SELECT * FROM no_such_table")
 } catch {
-  @lib.DbError::ServerError(code~, name~, message~) =>
-    println("服务器错误: code=" + code.to_string() + " " + message)
+  @lib.DbError::ServerError(code~, name=_, message~) =>
+    println("server error: code=" + code.to_string() + " " + message)
   @lib.DbError::ConnectionError(msg) =>
-    println("连接错误: " + msg)
+    println("connection error: " + msg)
   _ => println("其他错误")
 }
 ```
 
 ### `DbError` suberror
 
-```moonbit
+```moonbit nocheck
+///|
 pub suberror DbError {
   ServerError(code~ : Int, name~ : String, message~ : String)
   ConnectionError(String)
-} derive(@debug.Debug)
+} derive(Show)
 ```
 
-| 变体               | 字段                                             | 触发场景                              |
-| ------------------ | ------------------------------------------------ | ------------------------------------- |
-| `ServerError`      | `code : Int`、`name : String`、`message : String` | 服务器返回 Exception 包（查询被拒绝） |
-| `ConnectionError`  | `String`                                         | 协议 / I/O 错误（格式错误、意外 EOF）|
+| 变体            | 字段                                     | 何时抛出                                                              |
+| --------------- | ---------------------------------------- | --------------------------------------------------------------------- |
+| `ServerError`   | `code : Int`, `name : String`, `message : String` | 服务端返回非 2xx HTTP 响应，body 含错误信息                |
+| `ConnectionError`| `String`                                  | 网络 / I/O 错误（连接拒绝、响应格式异常等）                          |
 
-`code` 对应 ClickHouse 错误码（如 `60` = `UNKNOWN_TABLE`，
-`62` = `SYNTAX_ERROR`，`81` = `DATABASE_ACCESS_DENIED`）。
+`code` 是 HTTP 状态码（语法/未知表等客户端错误通常为 `400`，服务端错误为 `500`）。`name` 是 `"HTTPError"`。`message` 是响应体的前 500 字符（含 ClickHouse 异常文本）。
 
-## 支持的 ClickHouse 类型
+## 工作原理
 
-所有值以字符串形式返回。下表列出了各类型的传输格式和字符串表示。
+驱动每次调用发起一次 HTTP 请求：
 
-| ClickHouse 类型         | 传输格式                                   | 字符串表示                          |
-| ----------------------- | ------------------------------------------ | ----------------------------------- |
-| `UInt8`                 | 1 字节                                     | 十进制数字                          |
-| `UInt16`                | 2 字节 LE                                  | 十进制数字                          |
-| `UInt32`                | 4 字节 LE                                  | 十进制数字                          |
-| `UInt64`                | 8 字节 LE                                  | 十进制数字                          |
-| `Int8`                  | 1 字节（有符号）                           | 十进制数字                          |
-| `Int16`                 | 2 字节 LE（有符号）                        | 十进制数字                          |
-| `Int32`                 | 4 字节 LE（有符号）                        | 十进制数字                          |
-| `Int64`                 | 8 字节 LE（有符号）                        | 十进制数字                          |
-| `Int128` / `Int256`     | 16 / 32 字节                               | `<Int128>` / `<Int256>` 占位符      |
-| `UInt128` / `UInt256`   | 16 / 32 字节                               | `<UInt128>` / `<UInt256>` 占位符    |
-| `Float32`               | 4 字节 LE（IEEE 754）                      | 十进制数字                          |
-| `Float64`               | 8 字节 LE（IEEE 754）                      | 十进制数字                          |
-| `Bool`                  | 1 字节（`0` = false, `1` = true）          | `"true"` / `"false"`                |
-| `String`                | varuint 长度 + 字节                        | UTF-8 解码（容错）                  |
-| `FixedString(N)`        | `N` 字节                                   | UTF-8 解码（容错）                  |
-| `Date`                  | UInt16 LE（自 1970-01-01 的天数）          | `"YYYY-MM-DD"`                      |
-| `Date32`                | Int32 LE（自 1970-01-01 的天数）           | `"YYYY-MM-DD"`                      |
-| `DateTime`              | UInt32 LE（自 1970-01-01 的秒数）          | `"YYYY-MM-DD HH:MM:SS"`             |
-| `DateTime64(scale)`     | Int64 LE（`10^-scale` 秒的 tick 数）       | `"YYYY-MM-DD HH:MM:SS.fff..."`      |
-| `Decimal(P,S)` P≤9      | Int32 LE                                   | 带 `S` 位小数的数字                 |
-| `Decimal(P,S)` P≤18     | Int64 LE                                   | 带 `S` 位小数的数字                 |
-| `Decimal128/256`        | 16 / 32 字节                               | `<Decimal128(S)>` 占位符            |
-| `UUID`                  | 16 字节                                    | `"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"` |
-| `IPv4`                  | 4 字节 LE                                  | `"a.b.c.d"`                         |
-| `IPv6`                  | 16 字节                                    | 8 组十六进制，用 `:` 连接           |
-| `Enum8` / `Enum16`      | 1 / 2 字节（有符号）                       | 十进制数字                          |
-| `Nullable(T)`           | null 标志字节 + T                          | `"NULL"` 或 T 的值                  |
-| `Array(T)`              | 偏移量（UInt64 × 行数）+ T 元素            | `"[v1, v2, v3]"`                    |
-| `Tuple(T1, T2, ...)`    | 每个子列分别序列化                         | `"(v1, v2, v3)"`                    |
-| `Map(K, V)`             | 偏移量 + K + V（等同 `Array(Tuple(K,V))`） | `"{k1:v1, k2:v2}"`                  |
-| `LowCardinality(T)`     | 版本号 + 字典 + 索引                       | 底层 T 的值                         |
-
-### 注意事项
-
-- **Nullable 的 null_map 语义**：`0` = 非空，`1` = 空（与 MySQL / PostgreSQL 相反）。
-  驱动对空值返回 `"NULL"`，对非空值返回底层值。
-- `SimpleAggregateFunction(func, T)` 按内部类型 `T` 读取。
-- 字符串解码使用 **容错模式**（`@utf8.decode_lossy`）：无效的 UTF-8 字节会被
-  替换为 U+FFFD，而不是抛出错误。
-- `Int128` / `Int256` / `UInt128` / `UInt256` / `Decimal128` / `Decimal256`
-  尚未解析（MoonBit 缺少原生 128/256 位整数）；原始字节仍被正确消耗，
-  返回占位符字符串，不影响后续 block 解析的对齐。
-
-## DDL / INSERT / UPDATE / DELETE
-
-### DDL（已支持）
-
-DDL 语句通过标准查询路径发送，开箱即用：
-
-```moonbit
-ignore(conn.execute_query(
-  "CREATE TABLE demo (id Int32, name String) ENGINE = MergeTree() ORDER BY id"
-))
-ignore(conn.execute_query("DROP TABLE IF EXISTS demo"))
-ignore(conn.execute_query("TRUNCATE TABLE demo"))
+```
+POST /?database=<db>&default_format=TabSeparatedWithNamesAndTypes
+    &query=<url-encoded SQL>
+    [&param_<key>=<url-encoded value>...]
+HTTP/1.1
+Host: <host>:<port>
+Authorization: Basic <base64(user:password)>
+X-ClickHouse-Client-Name: <client_name>
+Connection: close
+Content-Length: 0
 ```
 
-### INSERT（暂不支持）
+ClickHouse 以 `TabSeparatedWithNamesAndTypes` 响应：
 
-原生协议中 `INSERT` 的流程与 `SELECT` 不同：
+```
+<col1>\t<col2>\t<col3>
+<Type1>\t<Type2>\t<Type3>
+<val1>\t<val2>\t<val3>
+<val4>\t<val5>\t<val6>
+...
+```
 
-1. 发送包含 `INSERT … VALUES …` 语句的 `Client::Query`
-2. 服务器响应 `EndOfStream`，**期望**客户端发送数据块
-3. 客户端发送 `Client::Data` 块，schema 需匹配表结构，包含要插入的行
-4. 客户端发送最终的空 `Client::Data` 表示输入结束
+驱动将其解析为 `ResultSet { columns, rows }`。
 
-当前 `execute_query` 只发送终止用的空数据块，服务器会挂起等待实际数据。
-需要实现专门的 `insert_into(table, columns, rows)` 辅助函数。
+为什么用 POST？ClickHouse 的 HTTP 接口将 `GET` 请求视为 `readonly`（`For queries over HTTP, method GET implies readonly`）。POST 适用于所有查询类型——SELECT、DDL、INSERT——所以我们只用一种方法。
 
-### ALTER TABLE UPDATE / DELETE（暂不支持同步等待）
-
-ClickHouse 的 `ALTER TABLE … UPDATE` / `DELETE` 是**异步 mutation**：
-服务器将 mutation 入队后立即返回，**不发送** `EndOfStream`，
-直到 mutation 在所有 part 上应用完毕。同步的 `execute_query` 会永久阻塞。
-
-可通过 `system.mutations` 轮询进度，或使用 ClickHouse 22.10+ 引入的
-**轻量级** `DELETE` / `UPDATE`（`DELETE FROM … WHERE …`），它们的行为类似
-普通查询，完成后会返回 `EndOfStream`。
+为什么命名参数用 URL 参数？ClickHouse 把 SQL 中的 `{key: Type}` 占位符替换为 `param_<key>=<value>` URL 参数。服务端负责加引号和类型转换，所以驱动可以直接传原始字符串而不必担心转义。
 
 ## ClickHouse 事务
 
-**ClickHouse 不支持传统 ACID 事务。** 没有 `BEGIN` / `COMMIT` / `ROLLBACK`，
-也没有 `Serializable` 隔离级别。上述 mutation 在单个 part 上是原子的，
-但跨 part 或跨表的原子性不保证。
+**ClickHouse 不支持传统 ACID 事务。** 没有 `BEGIN` / `COMMIT` / `ROLLBACK`，也没有 `Serializable` 隔离级别。`INSERT … SELECT` 在 part 级别是原子的。对于需要版本语义的场景，请使用特殊的表引擎：
 
-对于需要版本语义的数据，可使用特殊引擎：
+- `ReplacingMergeTree(version_column)` — 合并后保留 `version_column` 最大的行
+- `CollapsingMergeTree(sign_column)` — 用 `sign` 列（`+1` 插入、`-1` 取消）合并时折叠成对的行
+- `VersionedCollapsingMergeTree(version, sign)` — 类似 `CollapsingMergeTree`，但顺序无关
+- `SummingMergeTree` / `AggregatingMergeTree` — 用于状态聚合模式
 
-- `ReplacingMergeTree(version_column)` — merge 后保留 `version_column` 最大的行
-- `CollapsingMergeTree(sign_column)` — 用 `sign` 列（`+1` 插入，`-1` 取消）
-  在 merge 时折叠行对
-- `VersionedCollapsingMergeTree(version, sign)` — 类似 `CollapsingMergeTree`
-  但顺序无关
-- `SummingMergeTree` / `AggregatingMergeTree` — 状态聚合模式
+## 局限性
 
-`INSERT … SELECT` 是原子的，但仅在 part 级别。
-
-## 协议细节
-
-- 客户端协议版本：`54429`（连接时与服务器协商）
-- 握手：`Client::Hello` → `Server::Hello`
-- 查询：`Client::Query` + 终止用的空 `Client::Data` 块
-- 响应包类型：
-  - `1` — `Server::Data`（schema 和/或数据块）
-  - `2` — `Server::Exception`（错误）
-  - `3` — `Server::Progress`（进度：行数、字节数、总计、耗时）
-  - `4` — `Server::Pong`（`Client::Ping` 的响应）
-  - `5` — `Server::EndOfStream`（查询结束）
-  - `6` — `Server::ProfileInfo`（行数、块数、字节数、limit 信息）
-
-原生协议使用小端序。变长整数使用 ClickHouse 标准的 LEB128（`varuint`）编码。
-`String` 编码为 `varuint(长度)` + 字节。`Date`、`DateTime` 等是固定大小的 LE 整数。
-`Nullable(T)` 先发送每行的 null 标志字节，然后连续发送所有行的内部类型数据
-（列式存储，非行式）。`Array` 和 `Map` 先发送每行的累积偏移量（`UInt64`），
-然后连续发送所有内部数据。`LowCardinality` 发送版本号 + 字典 + 每行的字典索引。
-
-## 已知限制
-
-1. `INSERT` 未实现（见上文）
-2. `ALTER TABLE … UPDATE/DELETE` 会导致同步 `execute_query` 阻塞，
-   因为服务器在 mutation 完成前不发送 `EndOfStream`
-3. 某些服务器错误（如部分软错误）以 0 行 `Data` 块而非 `Exception` 包返回；
-   `try-catch` 基础设施已就位，但无法捕获这些情况
-4. `Int128` / `Int256` / `UInt128` / `UInt256` / `Decimal128` / `Decimal256`
-   返回占位符字符串；字节仍被正确消耗，不影响 block 解析对齐
-5. 驱动仅支持**原生 TCP** 协议，不支持 HTTP 及 `mysql` / `postgres` /
-   `interserver` 端口
+1. **无流式 / 进度回调** — HTTP 在关闭连接前返回完整结果。无法流式获取部分结果或逐行进度回调。
+2. **无法在查询中途取消** — 请求一旦发出，驱动就失去句柄。需要取消请断开连接。
+3. **仅内联 VALUES** — 批量插入（≫ 几千行）应切换到 ClickHouse 原生 TCP 协议，或使用支持 body 流式传输的 HTTP 插入 API（POST + `application/x-ndjson`）。本驱动保持最简形式：SQL 含字面 VALUES，字面值来自 `params`。
+4. **响应体大小限制** — `read_response_body` 强制 256 MB 上限以防止内存失控。返回更大的查询应使用过滤或聚合。
 
 ## 运行示例 CLI
 
@@ -367,7 +339,4 @@ ClickHouse 的 `ALTER TABLE … UPDATE` / `DELETE` 是**异步 mutation**：
 moon run cmd/main
 ```
 
-CLI 示例（`cmd/main/main.mbt`）演示了 ping、`SELECT`、DDL（`CREATE` / `DROP`）、
-异常捕获尝试，并打印了关于 INSERT / ALTER UPDATE 限制的说明。
-请根据你的环境修改 `main.mbt` 顶部的 `host` / `port` / `user` / `password` /
-`database` 字段。
+CLI 演示（`cmd/main/main.mbt`）依次演示 ping、参数化 SELECT、`CREATE TABLE`、带参数的内联 VALUES INSERT、带参数的 `SELECT … WHERE …`、异常处理与清理。
