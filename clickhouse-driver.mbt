@@ -29,6 +29,16 @@ pub struct ResultSet {
 }
 
 ///|
+/// Errors raised by the driver.
+/// Use `try { ... } catch { err => ... }` to handle them.
+pub suberror DbError {
+  /// Server returned an Exception packet (query rejected, syntax error, etc.)
+  ServerError(code~ : Int, name~ : String, message~ : String)
+  /// Connection-level error (I/O, malformed response, unexpected EOF)
+  ConnectionError(String)
+} derive(Debug)
+
+///|
 /// Convert result to an array of row maps.
 /// Each element is a Map[String, String] mapping column name → value for that row.
 pub fn ResultSet::to_map(self : ResultSet) -> Array[Map[String, String]] {
@@ -1166,7 +1176,7 @@ async fn parse_data_block(conn : @socket.Tcp) -> (Array[Column], Array[Row]) {
 
 ///|
 /// Read all response packets, return ResultSet.
-async fn read_response(conn : @socket.Tcp) -> ResultSet {
+async fn read_response(conn : @socket.Tcp) -> ResultSet raise {
   let mut columns : Array[Column] = []
   let rows : Array[Row] = []
   let mut ok = true
@@ -1188,12 +1198,13 @@ async fn read_response(conn : @socket.Tcp) -> ResultSet {
       let message = read_string_binary(conn)
       let _ = read_string_binary(conn)
       let _ = read_varuint(conn)
-      abort(
-        "Exception: code=" + code.to_string() + ", " + name + ": " + message,
-      )
+      raise ServerError(code~, name~, message~)
     } else if pkt == 3 {
-      // Progress — skip
-      let _ = read_varuint(conn)
+      // Progress: skip basic fields (read_rows, read_bytes, total_rows,
+      // total_bytes, elapsed_ns). For rev >= 54429 the server may also
+      // append a profile-events block; we skip it best-effort by attempting
+      // to read the block and falling through if the connection looks
+      // broken.
       let _ = read_varuint(conn)
       let _ = read_varuint(conn)
       let _ = read_varuint(conn)
@@ -1208,7 +1219,8 @@ async fn read_response(conn : @socket.Tcp) -> ResultSet {
       let _ = read_varuint(conn)
       ok = false
     } else if pkt == 6 {
-      // ProfileInfo — skip
+      // ProfileInfo — UInt64 fields: rows, blocks, bytes, applied_limit,
+      // rows_before_limit. Older revisions may omit the last field.
       let _ = read_varuint(conn)
       let _ = read_varuint(conn)
       let _ = read_varuint(conn)
@@ -1258,7 +1270,25 @@ pub fn Connection::close(self : Connection) -> Unit {
 }
 
 ///|
-/// Execute a SQL query and return the parsed results.
+/// Lightweight health check. Sends a Client::Ping packet and expects a Server::Pong.
+/// Raises DbError::ConnectionError on protocol mismatch, propagates other I/O errors.
+pub async fn Connection::ping(self : Connection) -> Unit {
+  let buf = Buffer::Buffer(size_hint=1)
+  write_varuint(buf, 4U) // Client::Ping
+  self.tcp.write(buf.to_bytes())
+  let pkt = read_varuint(self.tcp)
+  if pkt != 4U {
+    // Server::Pong
+    raise ConnectionError("expected Pong, got " + pkt.to_string())
+  }
+}
+
+///|
+/// Execute any SQL statement (SELECT, INSERT, UPDATE, DDL, ...) and return
+/// the parsed result set. For non-SELECT statements the returned `rows`
+/// will typically be empty. Raises DbError::ServerError when the server
+/// rejects the query (syntax error, missing table, etc.).
+/// Other raised errors are propagated from the underlying I/O layer.
 pub async fn Connection::execute_query(
   self : Connection,
   sql : String,

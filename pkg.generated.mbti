@@ -3,12 +3,17 @@ package "liuhuo23/clickhouse-driver"
 
 import {
   "moonbitlang/async/socket",
+  "moonbitlang/core/debug",
 }
 
 // Values
 pub async fn connect(host~ : String, port~ : Int, user~ : String, password~ : String, database~ : String, client_name~ : String) -> Connection
 
 // Errors
+pub suberror DbError {
+  ServerError(code~ : Int, name~ : String, message~ : String)
+  ConnectionError(String)
+} derive(@debug.Debug)
 
 // Types and methods
 pub struct Column {
@@ -24,6 +29,7 @@ pub struct Connection {
 }
 pub fn Connection::close(Self) -> Unit
 pub async fn Connection::execute_query(Self, String) -> ResultSet
+pub async fn Connection::ping(Self) -> Unit
 
 pub struct ResultSet {
   columns : Array[Column]
