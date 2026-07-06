@@ -305,11 +305,11 @@ fn parse_int_or(s : String, fallback : Int) -> Int {
 ///|
 /// Extract a substring [start, end) from a String.
 fn substr(s : String, start : Int, end : Int) -> String {
-  let mut result = ""
+  let buf = Buffer::Buffer(size_hint=end - start)
   for i in start..<end {
-    result = result + s[i].to_string()
+    buf.write_byte(s[i].to_int().to_byte())
   }
-  result
+  @utf8.decode_lossy(buf.to_bytes())
 }
 
 ///|
@@ -649,7 +649,7 @@ async fn read_varuint(conn : @socket.Tcp) -> UInt {
 async fn read_string_binary(conn : @socket.Tcp) -> String {
   let len = read_varuint(conn).reinterpret_as_int()
   let bytes = conn.read_exactly(len)
-  @utf8.decode(bytes)
+  @utf8.decode_lossy(bytes)
 }
 
 ///|
@@ -831,7 +831,7 @@ async fn read_typed_value(conn : @socket.Tcp, typ : CHType) -> String {
     String => read_string_binary(conn)
     FixedString(n) => {
       let bytes = conn.read_exactly(n)
-      @utf8.decode(bytes)
+      @utf8.decode_lossy(bytes)
     }
     Date => {
       // UInt16 LE — days since 1970-01-01
@@ -989,21 +989,109 @@ fn pow10_int64(n : Int) -> Int64 {
 
 ///|
 /// Read an entire column of num_rows values.
-/// Most types can be read value-by-value, but LowCardinality serializes
-/// the whole column as a unit (dictionary + indices) and must be handled here.
+/// In ClickHouse Native format, composite types serialize their sub-columns
+/// as contiguous blocks (not interleaved per-row). This function handles
+/// that column-oriented serialization for Nullable, Array, Tuple, Map,
+/// and LowCardinality.
 async fn read_column(
   conn : @socket.Tcp,
   typ : CHType,
   num_rows : Int,
 ) -> Array[String] {
   match typ {
+    Nullable(inner) => {
+      // Nullable: null_map (num_rows bytes) + nested column
+      // ClickHouse null_map: 0 = not null, 1 = null
+      let null_map = read_n_bytes(conn, num_rows)
+      let values = read_column(conn, inner, num_rows)
+      let result : Array[String] = []
+      for i in 0..<num_rows {
+        if null_map[i] == b'\x00' {
+          result.push(values[i])
+        } else {
+          result.push("NULL")
+        }
+      }
+      result
+    }
+    Array(inner) => {
+      // Array: offsets (num_rows UInt64) + nested data
+      // offsets are cumulative: [len1, len1+len2, len1+len2+len3, ...]
+      let lengths : Array[Int] = []
+      let mut prev = 0
+      for _ in 0..<num_rows {
+        let off = read_int64_le(conn).to_int()
+        lengths.push(off - prev)
+        prev = off
+      }
+      let total = prev
+      let elements = read_column(conn, inner, total)
+      let result : Array[String] = []
+      let mut idx = 0
+      for i in 0..<num_rows {
+        let len = lengths[i]
+        let mut s = "["
+        for j in 0..<len {
+          if j > 0 {
+            s = s + ", "
+          }
+          s = s + elements[idx]
+          idx = idx + 1
+        }
+        result.push(s + "]")
+      }
+      result
+    }
+    Tuple(types) => {
+      // Tuple: each sub-column is serialized contiguously
+      let sub_cols : Array[Array[String]] = []
+      for i in 0..<types.length() {
+        sub_cols.push(read_column(conn, types[i], num_rows))
+      }
+      let result : Array[String] = []
+      for r in 0..<num_rows {
+        let mut s = "("
+        for i in 0..<types.length() {
+          if i > 0 {
+            s = s + ", "
+          }
+          s = s + sub_cols[i][r]
+        }
+        result.push(s + ")")
+      }
+      result
+    }
+    Map(key_type, val_type) => {
+      // Map serializes as Array(Tuple(K, V)):
+      // offsets (num_rows UInt64) + keys + values
+      let lengths : Array[Int] = []
+      let mut prev = 0
+      for _ in 0..<num_rows {
+        let off = read_int64_le(conn).to_int()
+        lengths.push(off - prev)
+        prev = off
+      }
+      let total = prev
+      let keys = read_column(conn, key_type, total)
+      let vals = read_column(conn, val_type, total)
+      let result : Array[String] = []
+      let mut idx = 0
+      for i in 0..<num_rows {
+        let len = lengths[i]
+        let mut s = "{"
+        for j in 0..<len {
+          if j > 0 {
+            s = s + ", "
+          }
+          s = s + keys[idx] + ":" + vals[idx]
+          idx = idx + 1
+        }
+        result.push(s + "}")
+      }
+      result
+    }
     LowCardinality(inner) => {
-      // LowCardinality native serialization:
-      //   UInt64 version (usually 1 or 2)
-      //   UInt64 dict_size
-      //   dict_size values of inner type
-      //   UInt64 num_rows
-      //   num_rows UInt64 indices
+      // LowCardinality: version + dict_size + dict + num_rows + indices
       let _version = read_int64_le(conn)
       let dict_size = read_int64_le(conn).to_int()
       let dict : Array[String] = []
@@ -1023,7 +1111,7 @@ async fn read_column(
       result
     }
     _ => {
-      // All other types: read value-by-value (column is just N consecutive values)
+      // Simple types: read value-by-value (N consecutive values)
       let result : Array[String] = []
       for _ in 0..<num_rows {
         result.push(read_typed_value(conn, typ))
@@ -1045,20 +1133,16 @@ async fn parse_data_block(conn : @socket.Tcp) -> (Array[Column], Array[Row]) {
   let num_cols = read_varuint(conn).reinterpret_as_int()
   let num_rows = read_varuint(conn).reinterpret_as_int()
 
-  // Read column definitions (name + type)
+  // ClickHouse Native format: each column's name, type, and data are
+  // serialized together (name, type, data, name, type, data, ...)
   let cols : Array[Column] = []
-  let col_types : Array[CHType] = []
+  let columns_data : Array[Array[String]] = []
   for _c in 0..<num_cols {
     let name = read_string_binary(conn)
     let typ = read_string_binary(conn)
     cols.push({ name, type_: typ })
-    col_types.push(parse_type(typ))
-  }
-
-  // Read column data (column-major: each column's values are contiguous)
-  let columns_data : Array[Array[String]] = []
-  for _c in 0..<num_cols {
-    columns_data.push(read_column(conn, col_types[_c], num_rows))
+    let parsed = parse_type(typ)
+    columns_data.push(read_column(conn, parsed, num_rows))
   }
 
   // Transpose column-major data into row-major result
