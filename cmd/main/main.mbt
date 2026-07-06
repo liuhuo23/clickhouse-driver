@@ -31,8 +31,7 @@ async fn main {
   // Demo: to_map
   let maps = result.to_map()
   println("Map entries (" + maps.length().to_string() + " rows):")
-  for i in 0..<maps.length() {
-    let m = maps[i]
+  for i, m in maps {
     let mut line = "  row[" + i.to_string() + "]: {"
     for j in 0..<result.columns.length() {
       let col_name = result.columns[j].name
