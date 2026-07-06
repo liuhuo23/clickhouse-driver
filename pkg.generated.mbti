@@ -1,0 +1,41 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "liuhuo23/clickhouse-driver"
+
+import {
+  "moonbitlang/async/socket",
+}
+
+// Values
+pub async fn connect(host~ : String, port~ : Int, user~ : String, password~ : String, database~ : String, client_name~ : String) -> Connection
+
+// Errors
+
+// Types and methods
+pub struct Column {
+  name : String
+  type_ : String
+}
+
+pub struct Connection {
+  tcp : @socket.Tcp
+  server_rev : UInt
+  user : String
+  client_name : String
+}
+pub fn Connection::close(Self) -> Unit
+pub async fn Connection::execute_query(Self, String) -> ResultSet
+
+pub struct ResultSet {
+  columns : Array[Column]
+  rows : Array[Row]
+}
+pub fn ResultSet::to_map(Self) -> Map[String, Array[String]]
+
+pub struct Row {
+  values : Array[String]
+}
+
+// Type aliases
+
+// Traits
+
