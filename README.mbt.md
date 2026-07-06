@@ -1,5 +1,7 @@
 # liuhuo23/clickhouse-driver
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 A ClickHouse native TCP protocol driver for MoonBit.
 
 ## Overview
@@ -38,7 +40,8 @@ import {
 
 ## Quick start
 
-```moonbit
+```moonbit nocheck
+///|
 async fn main {
   let conn = @lib.connect(
     host="127.0.0.1",
@@ -79,7 +82,7 @@ async fn main {
 
 ### `connect`
 
-```moonbit
+```moonbit nocheck
 pub async fn connect(
   host~ : String,
   port~ : Int,
@@ -103,13 +106,13 @@ Establishes a TCP connection and performs the ClickHouse handshake.
 
 ### `Connection`
 
-```moonbit
+```moonbit nocheck
 pub struct Connection { ... }
 ```
 
 #### `Connection::ping`
 
-```moonbit
+```moonbit nocheck
 pub async fn ping(self : Connection) -> Unit raise
 ```
 
@@ -118,7 +121,7 @@ health check; does not execute a query.
 
 #### `Connection::execute_query`
 
-```moonbit
+```moonbit nocheck
 pub async fn execute_query(
   self : Connection,
   sql : String,
@@ -137,20 +140,21 @@ Raises:
 
 #### `Connection::close`
 
-```moonbit
+```moonbit nocheck
 pub fn close(self : Connection) -> Unit
 ```
 
 Closes the underlying TCP connection. Use with `defer`:
 
-```moonbit
+```moonbit nocheck
 let conn = @lib.connect(...)
 defer conn.close()
 ```
 
 ### `ResultSet`
 
-```moonbit
+```moonbit nocheck
+///|
 pub struct ResultSet {
   columns : Array[Column]
   rows : Array[Row]
@@ -159,7 +163,7 @@ pub struct ResultSet {
 
 #### `ResultSet::to_map`
 
-```moonbit
+```moonbit nocheck
 pub fn to_map(self : ResultSet) -> Array[Map[String, String]]
 ```
 
@@ -167,7 +171,7 @@ Converts the result to an array of per-row maps. Each element is a
 `Map[String, String]` where keys are column names and values are the
 string representation of the cell value.
 
-```moonbit
+```moonbit nocheck
 let rows = result.to_map()
 for m in rows {
   let name = m["name"]   // -> String? (use get_or_default if you need non-optional)
@@ -177,7 +181,8 @@ for m in rows {
 
 ### `Row`
 
-```moonbit
+```moonbit nocheck
+///|
 pub struct Row {
   values : Array[String]
 }
@@ -188,7 +193,8 @@ ClickHouse value (e.g. `"42"`, `"2025-01-01 00:00:00"`, `"NULL"`).
 
 ### `Column`
 
-```moonbit
+```moonbit nocheck
+///|
 pub struct Column {
   name : String
   type_ : String
@@ -200,7 +206,7 @@ Column metadata. `type_` is the raw ClickHouse type string, e.g.
 
 ## Error handling
 
-```moonbit
+```moonbit nocheck
 try {
   conn.execute_query("SELECT * FROM no_such_table")
 } catch {
@@ -214,7 +220,8 @@ try {
 
 ### `DbError` suberror
 
-```moonbit
+```moonbit nocheck
+///|
 pub suberror DbError {
   ServerError(code~ : Int, name~ : String, message~ : String)
   ConnectionError(String)
@@ -288,7 +295,7 @@ resulting string representation.
 DDL statements are sent through the standard query path and work
 out of the box:
 
-```moonbit
+```moonbit nocheck
 ignore(conn.execute_query(
   "CREATE TABLE demo (id Int32, name String) ENGINE = MergeTree() ORDER BY id"
 ))

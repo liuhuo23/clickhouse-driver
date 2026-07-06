@@ -27,9 +27,13 @@ async fn main {
     let r_sel = conn.execute_query(
       "SELECT 1 AS a, 'hi' AS b, now() AS t FORMAT TabSeparized",
     )
-    println("[2] SELECT 1, 'hi', now(): rows=" + r_sel.rows.length().to_string())
+    println(
+      "[2] SELECT 1, 'hi', now(): rows=" + r_sel.rows.length().to_string(),
+    )
     for row in r_sel.rows {
-      println("    a=" + row.values[0] + " b=" + row.values[1] + " t=" + row.values[2])
+      println(
+        "    a=" + row.values[0] + " b=" + row.values[1] + " t=" + row.values[2],
+      )
     }
 
     // ---- 3. DDL: CREATE TABLE ----

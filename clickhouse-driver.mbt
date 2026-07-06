@@ -105,7 +105,7 @@ priv enum CHType {
   LowCardinality(CHType)
   SimpleAggregateFunction(CHType)
   Unknown
-} derive(Eq, Show)
+} derive(Eq, Debug)
 
 ///|
 /// Parse a ClickHouse type string into a CHType.

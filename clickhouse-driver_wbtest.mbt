@@ -3,6 +3,9 @@
 // parsing, formatting, and type-system mapping.
 
 ///|
+using @test {assert_eq}
+
+///|
 test "civil_from_days: epoch" {
   let (y, m, d) = civil_from_days(0)
   assert_eq(y, 1970)
@@ -248,35 +251,39 @@ test "parse_type: Nullable" {
 ///|
 test "parse_type: Array" {
   assert_eq(parse_type("Array(Int32)"), CHType::Array(CHType::Int32))
-  assert_eq(parse_type("Array(Nullable(String))"), CHType::Array(
-    CHType::Nullable(CHType::String),
-  ))
+  assert_eq(
+    parse_type("Array(Nullable(String))"),
+    CHType::Array(CHType::Nullable(CHType::String)),
+  )
 }
 
 ///|
 test "parse_type: Tuple" {
-  assert_eq(parse_type("Tuple(String, Int32)"), CHType::Tuple([
-    CHType::String, CHType::Int32,
-  ]))
+  assert_eq(
+    parse_type("Tuple(String, Int32)"),
+    CHType::Tuple([CHType::String, CHType::Int32]),
+  )
   assert_eq(parse_type("Tuple()"), CHType::Tuple([]))
 }
 
 ///|
 test "parse_type: Map" {
-  assert_eq(parse_type("Map(String, Int32)"), CHType::Map(
-    CHType::String,
-    CHType::Int32,
-  ))
+  assert_eq(
+    parse_type("Map(String, Int32)"),
+    CHType::Map(CHType::String, CHType::Int32),
+  )
 }
 
 ///|
 test "parse_type: LowCardinality" {
-  assert_eq(parse_type("LowCardinality(String)"), CHType::LowCardinality(
-    CHType::String,
-  ))
-  assert_eq(parse_type("LowCardinality(Nullable(Int32))"), CHType::LowCardinality(
-    CHType::Nullable(CHType::Int32),
-  ))
+  assert_eq(
+    parse_type("LowCardinality(String)"),
+    CHType::LowCardinality(CHType::String),
+  )
+  assert_eq(
+    parse_type("LowCardinality(Nullable(Int32))"),
+    CHType::LowCardinality(CHType::Nullable(CHType::Int32)),
+  )
 }
 
 ///|
@@ -308,9 +315,10 @@ test "parse_type: unknown falls back" {
 test "parse_type: deeply nested" {
   // Array(Nullable(LowCardinality(String)))
   let t = parse_type("Array(Nullable(LowCardinality(String)))")
-  assert_eq(t, CHType::Array(CHType::Nullable(CHType::LowCardinality(
-    CHType::String,
-  ))))
+  assert_eq(
+    t,
+    CHType::Array(CHType::Nullable(CHType::LowCardinality(CHType::String))),
+  )
 }
 
 ///|
@@ -323,10 +331,7 @@ test "to_map: empty result" {
 ///|
 test "to_map: single row" {
   let result : ResultSet = {
-    columns: [
-      { name: "id", type_: "Int32" },
-      { name: "name", type_: "String" },
-    ],
+    columns: [{ name: "id", type_: "Int32" }, { name: "name", type_: "String" }],
     rows: [{ values: ["1", "alice"] }],
   }
   let maps = result.to_map()
@@ -339,11 +344,7 @@ test "to_map: single row" {
 test "to_map: multiple rows preserve order" {
   let result : ResultSet = {
     columns: [{ name: "n", type_: "Int32" }],
-    rows: [
-      { values: ["1"] },
-      { values: ["2"] },
-      { values: ["3"] },
-    ],
+    rows: [{ values: ["1"] }, { values: ["2"] }, { values: ["3"] }],
   }
   let maps = result.to_map()
   assert_eq(maps.length(), 3)
@@ -356,13 +357,11 @@ test "to_map: multiple rows preserve order" {
 test "to_map: NULL values preserved as string" {
   let result : ResultSet = {
     columns: [{ name: "x", type_: "Nullable(Int32)" }],
-    rows: [
-      { values: ["NULL"] },
-      { values: ["42"] },
-    ],
+    rows: [{ values: ["NULL"] }, { values: ["42"] }],
   }
   let maps = result.to_map()
   assert_eq(maps.length(), 2)
   assert_eq(maps[0].get("x"), Some("NULL"))
   assert_eq(maps[1].get("x"), Some("42"))
 }
+
