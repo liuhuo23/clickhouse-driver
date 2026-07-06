@@ -105,7 +105,7 @@ priv enum CHType {
   LowCardinality(CHType)
   SimpleAggregateFunction(CHType)
   Unknown
-}
+} derive(Eq, Show)
 
 ///|
 /// Parse a ClickHouse type string into a CHType.
@@ -1176,7 +1176,7 @@ async fn parse_data_block(conn : @socket.Tcp) -> (Array[Column], Array[Row]) {
 
 ///|
 /// Read all response packets, return ResultSet.
-async fn read_response(conn : @socket.Tcp) -> ResultSet raise {
+async fn read_response(conn : @socket.Tcp) -> ResultSet {
   let mut columns : Array[Column] = []
   let rows : Array[Row] = []
   let mut ok = true
