@@ -29,15 +29,19 @@ async fn main {
   }
 
   // Demo: to_map
-  let map = result.to_map()
-  println("Map entries:")
-  for i in 0..<result.columns.length() {
-    let col_name = result.columns[i].name
-    let vals = map[col_name]
-    let mut vals_str = ""
-    for j in 0..<vals.length() {
-      vals_str = vals_str + " " + vals[j]
+  let maps = result.to_map()
+  println("Map entries (" + maps.length().to_string() + " rows):")
+  for i in 0..<maps.length() {
+    let m = maps[i]
+    let mut line = "  row[" + i.to_string() + "]: {"
+    for j in 0..<result.columns.length() {
+      let col_name = result.columns[j].name
+      if j > 0 {
+        line = line + ", "
+      }
+      line = line + col_name + ": " + m[col_name]
     }
-    println("  " + col_name + " -> [" + vals_str + " ]")
+    line = line + "}"
+    println(line)
   }
 }

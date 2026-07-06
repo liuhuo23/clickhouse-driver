@@ -29,7 +29,7 @@ pub struct ResultSet {
   columns : Array[Column]
   rows : Array[Row]
 }
-pub fn ResultSet::to_map(Self) -> Map[String, Array[String]]
+pub fn ResultSet::to_map(Self) -> Array[Map[String, String]]
 
 pub struct Row {
   values : Array[String]

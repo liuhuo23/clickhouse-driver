@@ -29,18 +29,18 @@ pub struct ResultSet {
 }
 
 ///|
-/// Convert result to column_name → values map.
-pub fn ResultSet::to_map(self : ResultSet) -> Map[String, Array[String]] {
-  let map : Map[String, Array[String]] = Map([], capacity=0)
-  for i in 0..<self.columns.length() {
-    let col_name = self.columns[i].name
-    let vals : Array[String] = []
-    for r in 0..<self.rows.length() {
-      vals.push(self.rows[r].values[i])
+/// Convert result to an array of row maps.
+/// Each element is a Map[String, String] mapping column name → value for that row.
+pub fn ResultSet::to_map(self : ResultSet) -> Array[Map[String, String]] {
+  let result : Array[Map[String, String]] = []
+  for r in 0..<self.rows.length() {
+    let row_map : Map[String, String] = Map([], capacity=0)
+    for c in 0..<self.columns.length() {
+      row_map.set(self.columns[c].name, self.rows[r].values[c])
     }
-    map.set(col_name, vals)
+    result.push(row_map)
   }
-  map
+  result
 }
 
 ///|
