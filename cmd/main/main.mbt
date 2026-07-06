@@ -1,16 +1,13 @@
 ///|
-/// ClickHouse driver demo: SELECT, DDL, INSERT, ALTER UPDATE, exception handling.
+/// ClickHouse HTTP driver demo: comprehensive test of v0.4 features.
 /// Run with `moon run cmd/main`.
 ///
-/// NOTE: ClickHouse does NOT support traditional ACID transactions
-/// (BEGIN / COMMIT / ROLLBACK). For data mutations use ALTER TABLE ... UPDATE/DELETE
-/// (which run asynchronously as "mutations") or, since ClickHouse 22.10,
-/// lightweight DELETE/UPDATE statements. For atomicity on MergeTree tables,
-/// use ReplacingMergeTree / CollapsingMergeTree with explicit versioning.
+/// Single unified API: `execute_query(sql, params?)` — covers SELECT, DDL,
+/// and inline-VALUES INSERT, with optional named-parameter substitution.
 async fn main {
   let conn = @lib.connect(
     host="127.0.0.1",
-    port=9002,
+    port=8123,
     user="default",
     password="barn",
     database="default",
@@ -18,25 +15,61 @@ async fn main {
   )
   defer conn.close()
 
+  // ---- 0. Verify connection config ----
+  println(
+    "[0] connected to " +
+    conn.host +
+    ":" +
+    conn.port.to_string() +
+    " db=" +
+    conn.database +
+    " user=" +
+    conn.user,
+  )
+
   try {
     // ---- 1. Health check ----
     conn.ping()
     println("[1] ping ok")
 
-    // ---- 2. SELECT (local query, no cross-db) ----
+    // ---- 2. Cancel is a no-op over HTTP ----
+    conn.cancel()
+    println("[2] cancel() called (HTTP: no-op)")
+
+    // ---- 3. SELECT with named parameters ----
     let r_sel = conn.execute_query(
-      "SELECT 1 AS a, 'hi' AS b, now() AS t FORMAT TabSeparized",
+      "SELECT {x: UInt32} AS a, {s: String} AS b, {t: DateTime} AS t",
+      params=Map::from_array([
+        ("x", "1"),
+        ("s", "hi"),
+        ("t", "2024-01-01 00:00:00"),
+      ]),
     )
     println(
-      "[2] SELECT 1, 'hi', now(): rows=" + r_sel.rows.length().to_string(),
+      "[3] SELECT with params: rows=" +
+      r_sel.rows.length().to_string() +
+      " cols=" +
+      r_sel.columns.length().to_string(),
     )
     for row in r_sel.rows {
       println(
         "    a=" + row.values[0] + " b=" + row.values[1] + " t=" + row.values[2],
       )
     }
+    if r_sel.columns.length() > 0 {
+      println(
+        "    schema: " +
+        r_sel.columns[0].name +
+        ":" +
+        r_sel.columns[0].type_ +
+        ", " +
+        r_sel.columns[1].name +
+        ":" +
+        r_sel.columns[1].type_,
+      )
+    }
 
-    // ---- 3. DDL: CREATE TABLE ----
+    // ---- 4. DDL: CREATE TABLE (no params needed) ----
     let ddl =
       #|CREATE TABLE IF NOT EXISTS demo_drv (
       #|  id   Int32,
@@ -45,53 +78,109 @@ async fn main {
       #|) ENGINE = MergeTree()
       #|ORDER BY id
     ignore(conn.execute_query(ddl))
-    println("[3] DDL: CREATE TABLE demo_drv ok")
+    println("[4] CREATE TABLE demo_drv ok")
 
-    // ---- 4. INSERT (skipped: requires separate data-block protocol) ----
-    // For native-protocol INSERTs, the client must send a Client::Data block
-    // matching the INSERT schema, then a terminating empty data block. The
-    // current execute_query() always sends a single empty data block, which
-    // works for SELECT/DDL but not for INSERTs that need a data round-trip.
-    println("[4] INSERT skipped (would hang without data blocks; see code)")
+    // ---- 5. INSERT with named parameters (all values via params) ----
+    ignore(
+      conn.execute_query(
+        "INSERT INTO demo_drv (id, name, ts) VALUES " +
+        "({rid: Int32}, {rname: String}, {rts: DateTime}), " +
+        "({rid2: Int32}, {rname2: String}, {rts2: DateTime}), " +
+        "({rid3: Int32}, {rname3: String}, {rts3: DateTime})",
+        params=Map::from_array([
+          ("rid", "1"),
+          ("rname", "alice"),
+          ("rts", "2024-01-01 00:00:00"),
+          ("rid2", "2"),
+          ("rname2", "bob"),
+          ("rts2", "2024-01-01 00:00:01"),
+          ("rid3", "3"),
+          ("rname3", "carol"),
+          ("rts3", "2024-06-15 12:30:00"),
+        ]),
+      ),
+    )
+    println("[5] INSERT demo_drv ok (3 rows, all via params)")
 
-    // ---- 5. SELECT to verify (any rows already in the table) ----
-    let r2 = conn.execute_query("SELECT id, name FROM demo_drv ORDER BY id")
-    println("[5] SELECT demo_drv: rows=" + r2.rows.length().to_string())
+    // ---- 6. SELECT verify INSERT (with WHERE filter via param) ----
+    let r2 = conn.execute_query(
+      "SELECT id, name, ts FROM demo_drv WHERE id >= {lo: Int32} ORDER BY id",
+      params=Map::from_array([("lo", "0")]),
+    )
+    println(
+      "[6] SELECT demo_drv WHERE id >= {lo}: rows=" +
+      r2.rows.length().to_string(),
+    )
     for row in r2.rows {
-      let mut line = "    "
-      for v in row.values {
-        line = line + v + " "
-      }
-      println(line)
+      println(
+        "    id=" +
+        row.values[0] +
+        " name=" +
+        row.values[1] +
+        " ts=" +
+        row.values[2],
+      )
     }
 
-    // ---- 6. Mutation (skipped: ALTER TABLE UPDATE/DELETE returns no
-    // EndOfStream until the mutation completes asynchronously, which our
-    // synchronous request/response execute_query() can't wait for).
-    println("[6] ALTER TABLE ... UPDATE skipped (async mutation; would hang)")
+    // ---- 7. SELECT with to_map() ----
+    let rows_map = r2.to_map()
+    println("[7] to_map() result:")
+    for m in rows_map {
+      println(
+        "    " +
+        m.get_or_default("id", "?") +
+        " -> " +
+        m.get_or_default("name", "?"),
+      )
+    }
 
-    // ---- 7. Exception handling: query against nonexistent table ----
+    // ---- 8. ServerError: nonexistent table ----
     try {
-      let _ = conn.execute_query("SELECT * FROM system.no_such_table_xyz")
-      println("[7] unexpected success")
+      ignore(
+        conn.execute_query(
+          "SELECT * FROM {tn: String}",
+          params=Map::from_array([("tn", "system.no_such_table_xyz")]),
+        ),
+      )
+      println("[8] UNEXPECTED: query succeeded")
     } catch {
       @lib.DbError::ServerError(code~, name=_, message~) =>
         println(
-          "[7] caught ServerError: code=" + code.to_string() + " msg=" + message,
+          "[8] caught ServerError(code=" + code.to_string() + "): " + message,
         )
       @lib.DbError::ConnectionError(msg) =>
-        println("[7] caught ConnectionError: " + msg)
-      _ => println("[7] caught unknown error")
+        println("[8] caught ConnectionError: " + msg)
+      _ as e => println("[8] caught other: " + e.to_string())
     }
 
-    // ---- 8. Cleanup ----
+    // ---- 9. Syntax error ----
+    try {
+      ignore(conn.execute_query("SLECT 1")) // typo: SLECT
+      println("[9] UNEXPECTED: syntax error not caught")
+    } catch {
+      @lib.DbError::ServerError(code~, name=_, message~) =>
+        println(
+          "[9] caught syntax error (code=" + code.to_string() + "): " + message,
+        )
+      @lib.DbError::ConnectionError(msg) =>
+        println("[9] caught ConnectionError: " + msg)
+      _ => println("[9] caught unknown")
+    }
+
+    // ---- 10. Ping after errors ----
+    conn.ping()
+    println("[10] ping after errors ok")
+
+    // ---- Cleanup ----
     ignore(conn.execute_query("DROP TABLE IF EXISTS demo_drv"))
-    println("[8] DROP TABLE demo_drv ok")
+    println("[cleanup] DROP TABLE demo_drv ok")
   } catch {
     @lib.DbError::ServerError(code~, name=_, message~) =>
-      println("top-level ServerError: code=" + code.to_string() + " " + message)
+      println("TOP-LEVEL ServerError: code=" + code.to_string() + " " + message)
     @lib.DbError::ConnectionError(msg) =>
-      println("top-level ConnectionError: " + msg)
-    _ => ()
+      println("TOP-LEVEL ConnectionError: " + msg)
+    _ as e => println("TOP-LEVEL unknown: " + e.to_string())
   }
+
+  println("All tests completed.")
 }

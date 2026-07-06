@@ -19,12 +19,11 @@ repository = ""
 
 license = "Apache-2.0"
 
-keywords = []
+keywords = [ ]
 
 preferred_target = "native"
 
 description = "一个ClickHouse的驱动库"
-
 
 import {
   "moonbitlang/async@0.20.1",

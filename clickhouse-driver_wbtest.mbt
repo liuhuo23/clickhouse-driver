@@ -1,177 +1,207 @@
-// Whitebox tests for internal helpers.
-// These exercise the pure functions that do the heavy lifting for value
-// parsing, formatting, and type-system mapping.
+// Whitebox tests for internal helpers of the HTTP-based driver.
+// Pure functions only — no network I/O.
 
 ///|
 using @test {assert_eq}
 
 ///|
-test "civil_from_days: epoch" {
-  let (y, m, d) = civil_from_days(0)
-  assert_eq(y, 1970)
-  assert_eq(m, 1)
-  assert_eq(d, 1)
+/// Try to parse a string as Int, returning fallback on failure.
+fn parse_int_or(s : String, fallback : Int) -> Int {
+  let s = s.trim()
+  if s.length() == 0 {
+    return fallback
+  }
+  let mut result = 0
+  let mut idx = 0
+  let mut neg = false
+  if s[0] == '-' {
+    neg = true
+    idx = 1
+  } else if s[0] == '+' {
+    idx = 1
+  }
+  let mut ok = true
+  while idx < s.length() {
+    let c = s[idx].to_int() - '0'.to_int()
+    if c >= 0 && c <= 9 {
+      result = result * 10 + c
+    } else {
+      ok = false
+      break
+    }
+    idx = idx + 1
+  }
+  if ok {
+    if neg {
+      -result
+    } else {
+      result
+    }
+  } else {
+    fallback
+  }
+}
+
+// ============ URL encoding ============
+
+///|
+test "url_encode: passthrough ASCII alphanumerics" {
+  assert_eq(url_encode("abcXYZ123"), "abcXYZ123")
+  assert_eq(url_encode(""), "")
+  assert_eq(url_encode("with-dash_and.dot~tilde"), "with-dash_and.dot~tilde")
 }
 
 ///|
-test "civil_from_days: 2000-01-01" {
-  // 2000-01-01 is day 10957 since 1970-01-01
-  let (y, m, d) = civil_from_days(10957)
-  assert_eq(y, 2000)
-  assert_eq(m, 1)
-  assert_eq(d, 1)
+test "url_encode: encodes spaces and reserved chars" {
+  // We use lowercase hex per RFC 3986 (ClickHouse accepts either)
+  assert_eq(url_encode("a b"), "a%20b")
+  assert_eq(url_encode("a&b=c"), "a%26b%3dc")
+  assert_eq(url_encode("a+b"), "a%2bb")
+  assert_eq(url_encode("a%b"), "a%25b")
+  assert_eq(url_encode("a/b"), "a%2fb")
 }
 
 ///|
-test "civil_from_days: 2024-02-29 (leap day)" {
-  // 2024-01-01 = day 19723; Feb has 29 days in 2024 (leap); so
-  // 2024-02-29 = 19723 + 31 + 28 = 19782 (counting Feb 1..29 as 28 days past Jan).
-  let (y, m, d) = civil_from_days(19782)
-  assert_eq(y, 2024)
-  assert_eq(m, 2)
-  assert_eq(d, 29)
+test "url_encode: encodes query string" {
+  assert_eq(
+    url_encode("SELECT 1 AS x FROM db WHERE y = 'hi'"),
+    "SELECT%201%20AS%20x%20FROM%20db%20WHERE%20y%20%3d%20%27hi%27",
+  )
+}
+
+// ============ Basic auth header ============
+
+///|
+test "basic_auth_header: encodes user:password as base64" {
+  // base64("user:pass") = "dXNlcjpwYXNz"
+  assert_eq(basic_auth_header("user", "pass"), "Basic dXNlcjpwYXNz")
+  assert_eq(basic_auth_header("default", "barn"), "Basic ZGVmYXVsdDpiYXJu")
+  assert_eq(basic_auth_header("u", ""), "Basic dTo=")
+}
+
+// ============ TSV parsing ============
+
+///|
+test "split_tsv_line: simple cells" {
+  let r = split_tsv_line("a\tb\tc")
+  assert_eq(r.length(), 3)
+  assert_eq(r[0], "a")
+  assert_eq(r[1], "b")
+  assert_eq(r[2], "c")
 }
 
 ///|
-test "civil_from_days: pre-epoch" {
-  // 1969-12-31 is day -1
-  let (y, m, d) = civil_from_days(-1)
-  assert_eq(y, 1969)
-  assert_eq(m, 12)
-  assert_eq(d, 31)
+test "split_tsv_line: single cell no tabs" {
+  let r = split_tsv_line("hello")
+  assert_eq(r.length(), 1)
+  assert_eq(r[0], "hello")
 }
 
 ///|
-test "format_date" {
-  assert_eq(format_date(0), "1970-01-01")
-  assert_eq(format_date(19737), "2024-01-15")
+test "split_tsv_line: empty cells" {
+  let r = split_tsv_line("\t\t")
+  assert_eq(r.length(), 3)
+  assert_eq(r[0], "")
+  assert_eq(r[1], "")
+  assert_eq(r[2], "")
 }
 
 ///|
-test "format_datetime" {
-  assert_eq(format_datetime(0), "1970-01-01 00:00:00")
-  assert_eq(format_datetime(86400), "1970-01-02 00:00:00")
-  assert_eq(format_datetime(60), "1970-01-01 00:01:00")
-  assert_eq(format_datetime(3600), "1970-01-01 01:00:00")
+test "split_tsv_line: unescapes backslash sequences" {
+  // Embedded tab/newline/backslash inside a cell
+  let r = split_tsv_line("a\\tb\tc")
+  assert_eq(r.length(), 2)
+  assert_eq(r[0], "a\tb")
+  assert_eq(r[1], "c")
 }
 
 ///|
-test "format_decimal_str: scale 0" {
-  assert_eq(format_decimal_str(12345L, 0), "12345")
-  assert_eq(format_decimal_str(0L, 0), "0")
+test "parse_tsv_response: names + types + rows" {
+  let body = "id\tname\tvalue\nUInt32\tString\tFloat64\n1\talice\t1.5\n2\tbob\t2.5\n"
+  let r = parse_tsv_response(body)
+  assert_eq(r.columns.length(), 3)
+  assert_eq(r.columns[0].name, "id")
+  assert_eq(r.columns[0].type_, "UInt32")
+  assert_eq(r.columns[1].name, "name")
+  assert_eq(r.columns[1].type_, "String")
+  assert_eq(r.columns[2].name, "value")
+  assert_eq(r.columns[2].type_, "Float64")
+  assert_eq(r.rows.length(), 2)
+  assert_eq(r.rows[0].values[0], "1")
+  assert_eq(r.rows[0].values[1], "alice")
+  assert_eq(r.rows[0].values[2], "1.5")
+  assert_eq(r.rows[1].values[0], "2")
+  assert_eq(r.rows[1].values[1], "bob")
+  assert_eq(r.rows[1].values[2], "2.5")
 }
 
 ///|
-test "format_decimal_str: positive with scale" {
-  assert_eq(format_decimal_str(12345L, 2), "123.45")
-  assert_eq(format_decimal_str(100L, 2), "1.00")
-  assert_eq(format_decimal_str(1L, 2), "0.01")
+test "parse_tsv_response: schema-only block (DDL response)" {
+  let body = "id\tname\nUInt32\tString\n"
+  let r = parse_tsv_response(body)
+  assert_eq(r.columns.length(), 2)
+  assert_eq(r.rows.length(), 0)
 }
 
 ///|
-test "format_decimal_str: negative with scale" {
-  assert_eq(format_decimal_str(-12345L, 2), "-123.45")
-  assert_eq(format_decimal_str(-100L, 2), "-1.00")
+test "parse_tsv_response: empty body" {
+  let r = parse_tsv_response("")
+  assert_eq(r.columns.length(), 0)
+  assert_eq(r.rows.length(), 0)
 }
 
 ///|
-test "format_decimal_str: scale larger than digits" {
-  assert_eq(format_decimal_str(5L, 3), "0.005")
-  assert_eq(format_decimal_str(5L, 5), "0.00005")
+test "parse_tsv_response: \\r\\n line endings" {
+  let body = "a\tb\r\nInt32\tString\r\nx\ty\r\n"
+  let r = parse_tsv_response(body)
+  assert_eq(r.columns.length(), 2)
+  assert_eq(r.rows.length(), 1)
+  assert_eq(r.rows[0].values[0], "x")
+  assert_eq(r.rows[0].values[1], "y")
 }
 
-///|
-test "hex_nibble: 0..15" {
-  assert_eq(hex_nibble(0), "0")
-  assert_eq(hex_nibble(1), "1")
-  assert_eq(hex_nibble(9), "9")
-  assert_eq(hex_nibble(10), "a")
-  assert_eq(hex_nibble(11), "b")
-  assert_eq(hex_nibble(15), "f")
-}
+// ============ ResultSet::to_map ============
 
 ///|
-test "int_to_hex_str: zero" {
-  assert_eq(int_to_hex_str(0, 4), "0000")
-  assert_eq(int_to_hex_str(0, 8), "00000000")
+test "to_map: produces per-row column maps" {
+  let rs : ResultSet = {
+    columns: [
+      { name: "id", type_: "UInt32" },
+      { name: "name", type_: "String" },
+    ],
+    rows: [{ values: ["1", "alice"] }, { values: ["2", "bob"] }],
+  }
+  let maps = rs.to_map()
+  assert_eq(maps.length(), 2)
+  assert_eq(maps[0].get("id"), Some("1"))
+  assert_eq(maps[0].get("name"), Some("alice"))
+  assert_eq(maps[1].get("id"), Some("2"))
+  assert_eq(maps[1].get("name"), Some("bob"))
 }
 
-///|
-test "int_to_hex_str: full width" {
-  assert_eq(int_to_hex_str(0xff, 4), "00ff")
-  assert_eq(int_to_hex_str(0x1234, 4), "1234")
-  assert_eq(int_to_hex_str(0xabcd, 4), "abcd")
-}
+// ============ Generic helpers ============
 
 ///|
-test "pad2" {
-  assert_eq(pad2(0), "00")
-  assert_eq(pad2(5), "05")
-  assert_eq(pad2(42), "42")
-  assert_eq(pad2(123), "123")
-}
-
-///|
-test "pad4" {
-  assert_eq(pad4(0), "0000")
-  assert_eq(pad4(5), "0005")
-  assert_eq(pad4(2024), "2024")
-  assert_eq(pad4(12345), "12345")
-}
-
-///|
-test "str_repeat" {
-  assert_eq(str_repeat("ab", 3), "ababab")
-  assert_eq(str_repeat("x", 0), "")
-  assert_eq(str_repeat("", 5), "")
-}
-
-///|
-test "substr: basic range" {
-  assert_eq(substr("Hello World", 0, 5), "Hello")
-  assert_eq(substr("Hello World", 6, 11), "World")
-}
-
-///|
-test "substr: full string" {
-  assert_eq(substr("Hello", 0, 5), "Hello")
-}
-
-///|
-test "substr: empty range" {
-  assert_eq(substr("Hello", 2, 2), "")
-}
-
-///|
-test "substr: prefix" {
-  assert_eq(substr("Hello", 0, 3), "Hel")
-}
-
-///|
-test "parse_int_or: valid positive" {
+test "parse_int_or: positive numbers" {
   assert_eq(parse_int_or("42", -1), 42)
   assert_eq(parse_int_or("0", -1), 0)
   assert_eq(parse_int_or("100", -1), 100)
 }
 
 ///|
-test "parse_int_or: valid negative" {
+test "parse_int_or: negative numbers" {
   assert_eq(parse_int_or("-1", 0), -1)
   assert_eq(parse_int_or("-100", 0), -100)
 }
 
 ///|
-test "parse_int_or: with sign" {
+test "parse_int_or: signs and whitespace" {
   assert_eq(parse_int_or("+42", 0), 42)
-}
-
-///|
-test "parse_int_or: with whitespace" {
   assert_eq(parse_int_or("  42  ", 0), 42)
 }
 
 ///|
-test "parse_int_or: invalid returns fallback" {
+test "parse_int_or: invalid falls back" {
   assert_eq(parse_int_or("abc", -1), -1)
   assert_eq(parse_int_or("12abc", -1), -1)
   assert_eq(parse_int_or("", 99), 99)
@@ -179,189 +209,80 @@ test "parse_int_or: invalid returns fallback" {
 }
 
 ///|
-test "split_type_list: three simple" {
-  let parts = split_type_list("String, Int32, DateTime")
-  assert_eq(parts.length(), 3)
-  assert_eq(parts[0], "String")
-  assert_eq(parts[1], "Int32")
-  assert_eq(parts[2], "DateTime")
+test "substr: byte-indexed slice" {
+  assert_eq(substr("Hello World", 0, 5), "Hello")
+  assert_eq(substr("Hello World", 6, 11), "World")
+  assert_eq(substr("Hello", 0, 5), "Hello")
+  assert_eq(substr("Hello", 0, 0), "")
 }
 
 ///|
-test "split_type_list: with nested parens" {
-  let parts = split_type_list("String, Nullable(Int32), Array(Float64)")
-  assert_eq(parts.length(), 3)
-  assert_eq(parts[0], "String")
-  assert_eq(parts[1], "Nullable(Int32)")
-  assert_eq(parts[2], "Array(Float64)")
+test "substr: clamps out-of-range" {
+  // end past string length is clamped
+  assert_eq(substr("Hi", 0, 100), "Hi")
+  // start past end returns empty
+  assert_eq(substr("Hi", 5, 10), "")
 }
 
-///|
-test "split_type_list: with Tuple in middle" {
-  let parts = split_type_list("Int32, Tuple(String, Int64), Bool")
-  assert_eq(parts.length(), 3)
-  assert_eq(parts[0], "Int32")
-  assert_eq(parts[1], "Tuple(String, Int64)")
-  assert_eq(parts[2], "Bool")
-}
+// ============ build_url with named params ============
 
 ///|
-test "extract_parens: Nullable" {
-  assert_eq(extract_parens("Nullable(Int32)", 8), "Int32")
-}
-
-///|
-test "extract_parens: Array" {
-  assert_eq(extract_parens("Array(String)", 5), "String")
-}
-
-///|
-test "extract_parens: DateTime64" {
-  assert_eq(extract_parens("DateTime64(3, 'UTC')", 10), "3, 'UTC'")
-}
-
-///|
-test "extract_parens: FixedString" {
-  assert_eq(extract_parens("FixedString(16)", 11), "16")
-}
-
-///|
-test "parse_type: simple scalars" {
-  assert_eq(parse_type("UInt8"), CHType::UInt8)
-  assert_eq(parse_type("UInt32"), CHType::UInt32)
-  assert_eq(parse_type("Int64"), CHType::Int64)
-  assert_eq(parse_type("Float64"), CHType::Float64)
-  assert_eq(parse_type("Bool"), CHType::Bool)
-  assert_eq(parse_type("String"), CHType::String)
-  assert_eq(parse_type("UUID"), CHType::UUID)
-  assert_eq(parse_type("DateTime"), CHType::DateTime)
-}
-
-///|
-test "parse_type: with whitespace" {
-  assert_eq(parse_type("  Int32  "), CHType::Int32)
-}
-
-///|
-test "parse_type: Nullable" {
-  assert_eq(parse_type("Nullable(Int32)"), CHType::Nullable(CHType::Int32))
-  assert_eq(parse_type("Nullable(String)"), CHType::Nullable(CHType::String))
-}
-
-///|
-test "parse_type: Array" {
-  assert_eq(parse_type("Array(Int32)"), CHType::Array(CHType::Int32))
-  assert_eq(
-    parse_type("Array(Nullable(String))"),
-    CHType::Array(CHType::Nullable(CHType::String)),
-  )
-}
-
-///|
-test "parse_type: Tuple" {
-  assert_eq(
-    parse_type("Tuple(String, Int32)"),
-    CHType::Tuple([CHType::String, CHType::Int32]),
-  )
-  assert_eq(parse_type("Tuple()"), CHType::Tuple([]))
-}
-
-///|
-test "parse_type: Map" {
-  assert_eq(
-    parse_type("Map(String, Int32)"),
-    CHType::Map(CHType::String, CHType::Int32),
-  )
-}
-
-///|
-test "parse_type: LowCardinality" {
-  assert_eq(
-    parse_type("LowCardinality(String)"),
-    CHType::LowCardinality(CHType::String),
-  )
-  assert_eq(
-    parse_type("LowCardinality(Nullable(Int32))"),
-    CHType::LowCardinality(CHType::Nullable(CHType::Int32)),
-  )
-}
-
-///|
-test "parse_type: Decimal with scale" {
-  assert_eq(parse_type("Decimal(18, 2)"), CHType::Decimal(18, 2))
-  assert_eq(parse_type("Decimal32(4)"), CHType::Decimal32(4))
-  assert_eq(parse_type("Decimal64(6)"), CHType::Decimal64(6))
-}
-
-///|
-test "parse_type: DateTime64 with scale" {
-  assert_eq(parse_type("DateTime64(3)"), CHType::DateTime64(3))
-  assert_eq(parse_type("DateTime64(9, 'UTC')"), CHType::DateTime64(9))
-}
-
-///|
-test "parse_type: FixedString" {
-  assert_eq(parse_type("FixedString(16)"), CHType::FixedString(16))
-  assert_eq(parse_type("FixedString(1)"), CHType::FixedString(1))
-}
-
-///|
-test "parse_type: unknown falls back" {
-  assert_eq(parse_type("SomeUnknownType"), CHType::Unknown)
-  assert_eq(parse_type(""), CHType::Unknown)
-}
-
-///|
-test "parse_type: deeply nested" {
-  // Array(Nullable(LowCardinality(String)))
-  let t = parse_type("Array(Nullable(LowCardinality(String)))")
-  assert_eq(
-    t,
-    CHType::Array(CHType::Nullable(CHType::LowCardinality(CHType::String))),
-  )
-}
-
-///|
-test "to_map: empty result" {
-  let result : ResultSet = { columns: [], rows: [] }
-  let maps = result.to_map()
-  assert_eq(maps.length(), 0)
-}
-
-///|
-test "to_map: single row" {
-  let result : ResultSet = {
-    columns: [{ name: "id", type_: "Int32" }, { name: "name", type_: "String" }],
-    rows: [{ values: ["1", "alice"] }],
+fn make_conn_for_url_test() -> Connection {
+  {
+    host: "127.0.0.1",
+    port: 8123,
+    user: "default",
+    password: "barn",
+    database: "default",
+    client_name: "moonbit-cli",
   }
-  let maps = result.to_map()
-  assert_eq(maps.length(), 1)
-  assert_eq(maps[0].get("id"), Some("1"))
-  assert_eq(maps[0].get("name"), Some("alice"))
 }
 
 ///|
-test "to_map: multiple rows preserve order" {
-  let result : ResultSet = {
-    columns: [{ name: "n", type_: "Int32" }],
-    rows: [{ values: ["1"] }, { values: ["2"] }, { values: ["3"] }],
-  }
-  let maps = result.to_map()
-  assert_eq(maps.length(), 3)
-  assert_eq(maps[0].get("n"), Some("1"))
-  assert_eq(maps[1].get("n"), Some("2"))
-  assert_eq(maps[2].get("n"), Some("3"))
+test "build_url: query only, no named params" {
+  let conn = make_conn_for_url_test()
+  let url = build_url(conn, "SELECT 1", {})
+  assert_eq(
+    url, "/?database=default&default_format=TabSeparatedWithNamesAndTypes&query=SELECT%201",
+  )
 }
 
 ///|
-test "to_map: NULL values preserved as string" {
-  let result : ResultSet = {
-    columns: [{ name: "x", type_: "Nullable(Int32)" }],
-    rows: [{ values: ["NULL"] }, { values: ["42"] }],
-  }
-  let maps = result.to_map()
-  assert_eq(maps.length(), 2)
-  assert_eq(maps[0].get("x"), Some("NULL"))
-  assert_eq(maps[1].get("x"), Some("42"))
+test "build_url: query with single named param" {
+  let conn = make_conn_for_url_test()
+  let url = build_url(
+    conn,
+    "SELECT {name: String}",
+    Map::from_array([("name", "hello")]),
+  )
+  // url_encode produces lowercase hex; spaces and braces encoded.
+  assert_eq(
+    url, "/?database=default&default_format=TabSeparatedWithNamesAndTypes&query=SELECT%20%7bname%3a%20String%7d&param_name=hello",
+  )
 }
 
+///|
+test "build_url: query with multiple named params" {
+  let conn = make_conn_for_url_test()
+  let url = build_url(
+    conn,
+    "SELECT {a: Int32}, {b: String}",
+    Map::from_array([("a", "1"), ("b", "hi")]),
+  )
+  // Map iteration order is implementation-defined; check both orderings.
+  let opt1 = "/?database=default&default_format=TabSeparatedWithNamesAndTypes&query=SELECT%20%7ba%3a%20Int32%7d%2c%20%7bb%3a%20String%7d&param_a=1&param_b=hi"
+  let opt2 = "/?database=default&default_format=TabSeparatedWithNamesAndTypes&query=SELECT%20%7ba%3a%20Int32%7d%2c%20%7bb%3a%20String%7d&param_b=hi&param_a=1"
+  assert_true(url == opt1 || url == opt2)
+}
+
+///|
+test "build_url: named param values are URL-encoded" {
+  let conn = make_conn_for_url_test()
+  let url = build_url(
+    conn,
+    "SELECT {ts: DateTime}",
+    Map::from_array([("ts", "2024-01-01 00:00:00")]),
+  )
+  // Space → %20, colon in DateTime → %3a (lowercase)
+  assert_true(url.contains("param_ts=2024-01-01%2000%3a00%3a00"))
+}

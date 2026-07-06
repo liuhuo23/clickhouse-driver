@@ -2,12 +2,11 @@
 package "liuhuo23/clickhouse-driver"
 
 import {
-  "moonbitlang/async/socket",
   "moonbitlang/core/debug",
 }
 
 // Values
-pub async fn connect(host~ : String, port~ : Int, user~ : String, password~ : String, database~ : String, client_name~ : String) -> Connection
+pub fn connect(host~ : String, port~ : Int, user~ : String, password~ : String, database~ : String, client_name~ : String) -> Connection
 
 // Errors
 pub suberror DbError {
@@ -22,13 +21,16 @@ pub struct Column {
 }
 
 pub struct Connection {
-  tcp : @socket.Tcp
-  server_rev : UInt
+  host : String
+  port : Int
   user : String
+  password : String
+  database : String
   client_name : String
 }
+pub fn Connection::cancel(Self) -> Unit
 pub fn Connection::close(Self) -> Unit
-pub async fn Connection::execute_query(Self, String) -> ResultSet
+pub async fn Connection::execute_query(Self, String, params? : Map[String, String]) -> ResultSet
 pub async fn Connection::ping(Self) -> Unit
 
 pub struct ResultSet {

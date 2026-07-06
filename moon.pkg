@@ -1,6 +1,9 @@
 import {
-  "moonbitlang/async/socket",
+  "moonbitlang/async/http",
+  "moonbitlang/async/io",
   "moonbitlang/core/buffer",
+  "moonbitlang/core/encoding/base64",
   "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/string",
   "moonbitlang/core/test",
 }
