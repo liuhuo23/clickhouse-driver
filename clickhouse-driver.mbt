@@ -256,14 +256,25 @@ fn apply_default_types(sql : String) -> String {
       // literal braces so they don't get mistaken for opener/closer.
       let inner = Buffer::Buffer(size_hint=8)
       let mut j = i + 1
-      println("[DEBUG] scan start i=" + i.to_string() + " len=" + bytes.length().to_string())
+      println(
+        "[DEBUG] scan start i=" +
+        i.to_string() +
+        " len=" +
+        bytes.length().to_string(),
+      )
       while j < bytes.length() && bytes[j] != b'}' {
         let c0 = bytes[j]
         println("[DEBUG] j=" + j.to_string() + " c0=" + c0.to_int().to_string())
-        let next_is_brace = j + 1 < bytes.length() && (bytes[j + 1] == b'{' || bytes[j + 1] == b'}')
+        let next_is_brace = j + 1 < bytes.length() &&
+          (bytes[j + 1] == b'{' || bytes[j + 1] == b'}')
         let same_char = next_is_brace && bytes[j + 1] == bytes[j]
         if same_char {
-          println("[DEBUG] brace escape at j=" + j.to_string() + " writing " + bytes[j].to_int().to_string())
+          println(
+            "[DEBUG] brace escape at j=" +
+            j.to_string() +
+            " writing " +
+            bytes[j].to_int().to_string(),
+          )
           inner.write_byte(bytes[j])
           j = j + 2
           continue

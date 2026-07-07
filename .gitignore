@@ -6,3 +6,5 @@ target
 .moonagent/
 .codewhale/
 .deepseek/
+docs/
+scripts/

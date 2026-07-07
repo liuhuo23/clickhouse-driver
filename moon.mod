@@ -15,11 +15,11 @@ version = "0.1.0"
 
 readme = "README.mbt.md"
 
-repository = "https://gitee.com/zhao2370/clickhouse-driver"
+repository = "https://github.com/liuhuo23/clickhouse-driver.git"
 
 license = "Apache-2.0"
 
-keywords = ["clickhouse", "driver", "database", "sql"]
+keywords = [ "clickhouse", "driver", "database", "sql" ]
 
 preferred_target = "native"
 
