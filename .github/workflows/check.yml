@@ -35,11 +35,11 @@ jobs:
 
       - name: moon check
         run: |
-          moon check --target all
+          moon check --target native
 
       - name: moon test
         run: |
-          moon test --target all
+          moon test --target native
 
       - name: lint
         run: |

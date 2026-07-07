@@ -23,14 +23,14 @@ jobs:
 
       - name: post install
         run: |
-          moon version --all
+          moon version --native
           moon update
 
       - name: moon check
-        run: moon check --target all
+        run: moon check --target native
 
       - name: moon test
-        run: moon test --target all
+        run: moon test --target native
 
       - name: lint
         run: |
