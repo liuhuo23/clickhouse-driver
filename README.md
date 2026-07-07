@@ -403,6 +403,15 @@ semantics, use one of the special engines:
 - `SummingMergeTree` / `AggregatingMergeTree` — for state-aggregation
   patterns.
 
+## Project nature
+
+This is an **original project**. It references the [ClickHouse HTTP interface documentation](https://clickhouse.com/docs/en/interfaces/http) for protocol behavior; no third-party driver code was ported. An early prototype explored the Native TCP protocol; the current implementation uses HTTP for portability and simplicity.
+
+| Resource | Link | License |
+| -------- | ---- | ------- |
+| ClickHouse (reference) | https://clickhouse.com/docs/en/interfaces/http | Apache-2.0 |
+| This project | — | Apache-2.0 |
+
 ## Limitations
 
 1. **Streaming / progress callbacks** — HTTP returns the full result

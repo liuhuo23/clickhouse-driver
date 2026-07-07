@@ -1,11 +1,13 @@
 name: publish-package
 
 on:
+  push:
+    tags:
+      - "*"
   workflow_dispatch:
 
 jobs:
-  publish:
-    # Use macos-latest or windows-latest if you want to publish to those platforms
+  check:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -24,11 +26,56 @@ jobs:
           moon version --all
           moon update
 
-      # Add -C if your moon.mod.json or moon.pkg.json is not in the root directory
-      - name: prepublish check
+      - name: moon check
+        run: moon check --target all
+
+      - name: moon test
+        run: moon test --target all
+
+      - name: lint
         run: |
-          moon check
-          moon test
+          moon fmt && git diff --exit-code
+          moon info && git diff --exit-code
+
+  publish:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: install-ubuntu
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> $GITHUB_PATH
+
+      - name: post install
+        run: |
+          moon version --all
+          moon update
+
+      # moon publish uses the version field in moon.mod; the git tag must match it.
+      - name: verify tag matches moon.mod version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          TAG_VERSION="${TAG#v}"
+          MOD_VERSION=$(grep -E '^version[[:space:]]*=' moon.mod | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
+          if [ -z "$MOD_VERSION" ]; then
+            echo "Error: could not parse version from moon.mod"
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$MOD_VERSION" ]; then
+            echo "Error: tag '$TAG' (version $TAG_VERSION) does not match moon.mod version '$MOD_VERSION'"
+            echo "Update moon.mod version before tagging, e.g.:"
+            echo "  version = \"$TAG_VERSION\""
+            exit 1
+          fi
+          echo "Version OK: tag $TAG matches moon.mod version $MOD_VERSION"
 
       - name: publish
         env:

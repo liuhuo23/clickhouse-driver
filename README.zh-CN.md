@@ -357,6 +357,15 @@ ClickHouse 以 `TabSeparatedWithNamesAndTypes` 响应：
 - `VersionedCollapsingMergeTree(version, sign)` — 类似 `CollapsingMergeTree`，但顺序无关
 - `SummingMergeTree` / `AggregatingMergeTree` — 用于状态聚合模式
 
+## 项目性质
+
+**原创项目。** 参考 [ClickHouse HTTP 接口文档](https://clickhouse.com/docs/en/interfaces/http) 实现协议行为，未移植第三方驱动代码。早期原型探索过 Native TCP 协议，当前实现采用 HTTP 以提升可移植性与简洁性。
+
+| 资源 | 链接 | 许可证 |
+| ---- | ---- | ------ |
+| ClickHouse（参考） | https://clickhouse.com/docs/en/interfaces/http | Apache-2.0 |
+| 本项目 | — | Apache-2.0 |
+
 ## 局限性
 
 1. **无流式 / 进度回调** — HTTP 在关闭连接前返回完整结果。无法流式获取部分结果或逐行进度回调。
