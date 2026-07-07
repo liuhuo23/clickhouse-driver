@@ -2,7 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-A ClickHouse **HTTP** driver for MoonBit — simple, portable, and stateless.
+A ClickHouse **HTTP** driver for MoonBit — simple and stateless. Validated on
+Linux and macOS today.
 
 ## Overview
 
@@ -25,6 +26,18 @@ A ClickHouse **HTTP** driver for MoonBit — simple, portable, and stateless.
   leak, no need to reconnect after long idle periods.
 - Compatible with ClickHouse 22.x+ (the HTTP interface has been stable since
   21.x).
+
+## Platform support
+
+| Platform | Status |
+| -------- | ------ |
+| Linux | ✅ Supported |
+| macOS | ✅ Supported |
+| Windows | ❌ Not validated yet (relies on `moonbitlang/async` native backend) |
+
+CI currently runs `moon check` and `moon test` on Linux and macOS only. Add
+`windows-latest` to the matrix in `.github/workflows/check.yml` once Windows
+support is ready.
 
 ## Installation
 

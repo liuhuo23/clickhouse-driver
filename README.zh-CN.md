@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-MoonBit 实现的 ClickHouse **HTTP** 协议驱动——简单、跨平台、无状态。
+MoonBit 实现的 ClickHouse **HTTP** 协议驱动——简单、无状态，当前在 Linux / macOS 上验证。
 
 ## 概览
 
@@ -17,6 +17,16 @@ MoonBit 实现的 ClickHouse **HTTP** 协议驱动——简单、跨平台、无
 - 通过 MoonBit `try-catch` 进行错误处理，定义了 `DbError` suberror（`ServerError` / `ConnectionError`）
 - 每次调用都建立短生命周期 HTTP 连接——无持久状态可泄漏，长时间空闲后无需重连
 - 兼容 ClickHouse 22.x+（HTTP 接口自 21.x 起稳定）
+
+## 平台支持
+
+| 平台 | 状态 |
+| ---- | ---- |
+| Linux | ✅ 支持 |
+| macOS | ✅ 支持 |
+| Windows | ❌ 暂未验证（依赖 `moonbitlang/async` native 后端） |
+
+当前 CI 仅在 Linux / macOS 上运行 `moon check` 与 `moon test`。Windows 支持就绪后，可在 `.github/workflows/check.yml` 的 matrix 中加入 `windows-latest`。
 
 ## 安装
 
