@@ -9,11 +9,16 @@ A ClickHouse **HTTP** driver for MoonBit — simple, portable, and stateless.
 - Uses the native ClickHouse HTTP interface (default port **8123**).
 - Responses parsed as **TabSeparatedWithNamesAndTypes** so column names and
   types come back automatically — no manual type mapping on the client side.
-- Single unified API: `execute_query(sql, params?)` covers SELECT, DDL,
-  and inline-VALUES INSERT.
-- **Named-parameter substitution** via ClickHouse's `{name: Type}` placeholder
-  syntax — values are passed as `param_<key>=<value>` URL parameters and
-  substituted server-side (quoted and escaped automatically).
+- Two flavors of parameter binding, both backed by ClickHouse's native
+  `{name: Type}` placeholder protocol:
+  - `execute_query(sql, params?)` — **named** binding with `{name}` /
+    `{name: Type}`. Untyped `{name}` defaults to `String`, so table names,
+    identifiers, and string columns read naturally.
+  - `execute(sql, values)` — **positional** binding with `?`. Concise form
+    for inline-VALUES INSERTs and other queries that repeat the same
+    parameter shape across rows — no need to invent unique names per row.
+  Values are passed as `param_<key>=<value>` URL parameters and substituted
+  server-side (quoted and escaped automatically).
 - Proper error handling via MoonBit `try-catch` with a `DbError` suberror
   (`ServerError` / `ConnectionError`).
 - Every call opens a short-lived HTTP connection — no persistent state to
@@ -61,7 +66,8 @@ async fn main {
   // 1. Health check
   conn.ping()
 
-  // 2. SELECT — columns come back automatically
+  // 2. SELECT — columns come back automatically. Untyped placeholders
+  //    default to String, so table names / string values need no type tag.
   let result = conn.execute_query(
     "SELECT id, name FROM users WHERE created_at > {lo: DateTime} LIMIT {n: UInt32}",
     params=Map::from_array([
@@ -85,15 +91,11 @@ async fn main {
     println(m["name"])
   }
 
-  // 6. INSERT via inline VALUES — all values come from params
+  // 6. INSERT — same `?` placeholder convention as other DB drivers.
   ignore(
-    conn.execute_query(
-      "INSERT INTO users (id, name) VALUES " +
-      "({id: UInt32}, {name: String}), ({id2: UInt32}, {name2: String})",
-      params=Map::from_array([
-        ("id", "1"), ("name", "alice"),
-        ("id2", "2"), ("name2", "bob"),
-      ]),
+    conn.execute(
+      "INSERT INTO users (id, name) VALUES (?, ?), (?, ?)",
+      ["1", "alice", "2", "bob"],
     ),
   )
 }
@@ -161,13 +163,18 @@ pub async fn execute_query(
 ) -> ResultSet raise
 ```
 
-Executes any SQL statement (SELECT, DDL, inline-VALUES INSERT, ...) and
-returns the parsed result.
+Executes any SQL statement (SELECT, DDL, inline-VALUES INSERT, ...) with
+**named** parameter binding and returns the parsed result.
 
 `params` is an optional map of named parameters. Each entry is sent as a
 `param_<key>=<value>` URL parameter, and ClickHouse substitutes the value
 into matching `{key: Type}` placeholders server-side. Values are
 automatically quoted and escaped — pass them as raw strings.
+
+For the common case where a parameter is a string (table name, identifier,
+or string column value), the type can be omitted — `{name}` is treated as
+`{name: String}` automatically. Use the explicit `{name: Type}` form only
+when binding into a non-String column (numbers, dates, etc.).
 
 Examples:
 
@@ -175,23 +182,55 @@ Examples:
 // No params
 let r = conn.execute_query("SELECT version()")
 
-// Single param
+// Single typed param (non-String column)
 let r = conn.execute_query(
   "SELECT * FROM events WHERE id = {id: UInt64}",
   params=Map::from_array([("id", "42")]),
 )
 
-// Multiple params, used in INSERT VALUES
-ignore(conn.execute_query(
-  "INSERT INTO events (id, ts, msg) VALUES " +
-  "({id: UInt64}, {ts: DateTime}, {msg: String})",
-  params=Map::from_array([
-    ("id", "1"),
-    ("ts", "2024-01-01 00:00:00"),
-    ("msg", "hello"),
-  ]),
-))
+// Table-name param — untyped {tn} defaults to String
+let r = conn.execute_query(
+  "SELECT count() FROM {tn}",
+  params=Map::from_array([("tn", "events")]),
+)
 ```
+
+#### `Connection::execute`
+
+```moonbit nocheck
+pub async fn execute(
+  self : Connection,
+  sql : String,
+  values : Array[String],
+) -> ResultSet raise
+```
+
+Executes SQL with **positional** `?` placeholders. Each `?` in the SQL is
+bound to the next value in `values`, in order. The concise form for
+inline-VALUES INSERTs and other queries that repeat the same parameter
+shape across rows — no need to invent unique names per row.
+
+All values are bound as `String`; ClickHouse coerces them to the target
+column type on the server side (works for numbers, dates, and most common
+scalar types). For non-String columns where coercion is not enough, fall
+back to `execute_query` with explicit `{name: Type}` named binding.
+
+Examples:
+
+```moonbit nocheck
+// Multi-row INSERT — same parameter shape repeated per row
+ignore(conn.execute(
+   "INSERT INTO events (id, ts, msg) VALUES (?, ?, ?), (?, ?, ?)",
+   ["1", "2024-01-01 00:00:00", "hello",
+    "2", "2024-01-02 00:00:00", "world"],
+ ))
+
+// Single-row with positional binding
+ignore(conn.execute(
+   "INSERT INTO events (id, name) VALUES (?, ?)",
+   ["42", "alice"],
+ ))
+ ```
 
 Raises:
 - `DbError::ServerError(code, name, message)` — the server returned a

@@ -30,6 +30,7 @@ pub struct Connection {
 }
 pub fn Connection::cancel(Self) -> Unit
 pub fn Connection::close(Self) -> Unit
+pub async fn Connection::execute(Self, String, Array[String]) -> ResultSet
 pub async fn Connection::execute_query(Self, String, params? : Map[String, String]) -> ResultSet
 pub async fn Connection::ping(Self) -> Unit
 

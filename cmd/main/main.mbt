@@ -38,7 +38,7 @@ async fn main {
 
     // ---- 3. SELECT with named parameters ----
     let r_sel = conn.execute_query(
-      "SELECT {x: UInt32} AS a, {s: String} AS b, {t: DateTime} AS t",
+      "SELECT {x: UInt32} AS a, {s} AS b, {t: DateTime} AS t",
       params=Map::from_array([
         ("x", "1"),
         ("s", "hi"),
@@ -80,27 +80,18 @@ async fn main {
     ignore(conn.execute_query(ddl))
     println("[4] CREATE TABLE demo_drv ok")
 
-    // ---- 5. INSERT with named parameters (all values via params) ----
+    // ---- 5. INSERT — same `?` placeholder convention as other DB drivers.
     ignore(
-      conn.execute_query(
+      conn.execute(
         "INSERT INTO demo_drv (id, name, ts) VALUES " +
-        "({rid: Int32}, {rname: String}, {rts: DateTime}), " +
-        "({rid2: Int32}, {rname2: String}, {rts2: DateTime}), " +
-        "({rid3: Int32}, {rname3: String}, {rts3: DateTime})",
-        params=Map::from_array([
-          ("rid", "1"),
-          ("rname", "alice"),
-          ("rts", "2024-01-01 00:00:00"),
-          ("rid2", "2"),
-          ("rname2", "bob"),
-          ("rts2", "2024-01-01 00:00:01"),
-          ("rid3", "3"),
-          ("rname3", "carol"),
-          ("rts3", "2024-06-15 12:30:00"),
-        ]),
+        "(?, ?, ?), (?, ?, ?), (?, ?, ?)",
+        [
+          "1", "alice", "2024-01-01 00:00:00", "2", "bob", "2024-01-01 00:00:01",
+          "3", "carol", "2024-06-15 12:30:00",
+        ],
       ),
     )
-    println("[5] INSERT demo_drv ok (3 rows, all via params)")
+    println("[5] INSERT demo_drv ok (3 rows via positional `?`)")
 
     // ---- 6. SELECT verify INSERT (with WHERE filter via param) ----
     let r2 = conn.execute_query(
@@ -138,7 +129,7 @@ async fn main {
     try {
       ignore(
         conn.execute_query(
-          "SELECT * FROM {tn: String}",
+          "SELECT * FROM {tn}",
           params=Map::from_array([("tn", "system.no_such_table_xyz")]),
         ),
       )

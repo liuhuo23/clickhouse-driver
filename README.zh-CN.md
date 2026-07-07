@@ -9,7 +9,11 @@ MoonBit 实现的 ClickHouse **HTTP** 协议驱动——简单、跨平台、无
 - 使用 ClickHouse 原生 HTTP 接口（默认端口 **8123**）
 - 响应以 **TabSeparatedWithNamesAndTypes** 解析，列名和类型自动返回，客户端无需手动类型映射
 - 单一统一 API：`execute_query(sql, params?)` 覆盖 SELECT、DDL、内联 VALUES INSERT
-- **命名参数替换** 通过 ClickHouse 的 `{name: Type}` 占位符语法实现——参数以 `param_<key>=<value>` URL 参数形式传入，由服务端（自动加引号、转义）替换
+- 两种参数绑定方式，均基于 ClickHouse 原生 `{name: Type}` 占位符协议：
+  - `execute_query(sql, params?)` — **命名**绑定，使用 `{name}` / `{name: Type}`。
+    无类型 `{name}` 默认为 `String`，所以表名、标识符、字符串列名书写更自然。
+  - `execute(sql, values)` — **位置**绑定，使用 `?`。当同一参数形状在多行重复出现时（典型场景是内联 VALUES INSERT）写法最简洁——不需要为每行发明不重复的名字。
+  参数以 `param_<key>=<value>` URL 参数形式传入，由服务端（自动加引号、转义）替换
 - 通过 MoonBit `try-catch` 进行错误处理，定义了 `DbError` suberror（`ServerError` / `ConnectionError`）
 - 每次调用都建立短生命周期 HTTP 连接——无持久状态可泄漏，长时间空闲后无需重连
 - 兼容 ClickHouse 22.x+（HTTP 接口自 21.x 起稳定）
@@ -54,7 +58,8 @@ async fn main {
   // 1. 健康检查
   conn.ping()
 
-  // 2. SELECT —— 列名和类型自动返回
+  // 2. SELECT —— 列名和类型自动返回。无类型占位符默认为 String，
+  //    所以表名 / 字符串值无需标注类型。
   let result = conn.execute_query(
     "SELECT id, name FROM users WHERE created_at > {lo: DateTime} LIMIT {n: UInt32}",
     params=Map::from_array([
@@ -78,15 +83,11 @@ async fn main {
     println(m["name"])
   }
 
-  // 6. INSERT（内联 VALUES，所有值来自 params）
+  // 6. INSERT —— 与其他数据库驱动一样，使用 `?` 占位符
   ignore(
-    conn.execute_query(
-      "INSERT INTO users (id, name) VALUES " +
-      "({id: UInt32}, {name: String}), ({id2: UInt32}, {name2: String})",
-      params=Map::from_array([
-        ("id", "1"), ("name", "alice"),
-        ("id2", "2"), ("name2", "bob"),
-      ]),
+    conn.execute(
+      "INSERT INTO users (id, name) VALUES (?, ?), (?, ?)",
+      ["1", "alice", "2", "bob"],
     ),
   )
 }
@@ -155,33 +156,63 @@ pub async fn execute_query(
 
 `params` 是可选的命名参数映射。每个条目会以 `param_<key>=<value>` URL 参数形式发送，ClickHouse 在服务端将值替换进匹配的 `{key: Type}` 占位符。值会被自动加引号并转义——直接传原始字符串即可。
 
+对于常见的字符串参数（表名、标识符、字符串列），可以省略类型——`{name}` 会被自动当作 `{name: String}` 处理。只有在需要绑定到非 String 列（数值、日期等）时，才需要使用 `{name: Type}` 显式标注。
+
 示例：
 
 ```moonbit nocheck
 // 无参数
 let r = conn.execute_query("SELECT version()")
 
-// 单个参数
+// 单个类型参数（非 String 列）
 let r = conn.execute_query(
   "SELECT * FROM events WHERE id = {id: UInt64}",
   params=Map::from_array([("id", "42")]),
 )
 
-// 多个参数，用于 INSERT VALUES
-ignore(conn.execute_query(
-  "INSERT INTO events (id, ts, msg) VALUES " +
-  "({id: UInt64}, {ts: DateTime}, {msg: String})",
-  params=Map::from_array([
-    ("id", "1"),
-    ("ts", "2024-01-01 00:00:00"),
-    ("msg", "hello"),
-  ]),
+// 表名作为参数 —— 无类型 {tn} 默认为 String
+let r = conn.execute_query(
+  "SELECT count() FROM {tn}",
+  params=Map::from_array([("tn", "events")]),
+)
+```
+
+#### `Connection::execute`
+
+```moonbit nocheck
+pub async fn execute(
+  self : Connection,
+  sql : String,
+  values : Array[String],
+) -> ResultSet raise
+```
+
+使用 **位置** `?` 占位符执行 SQL。SQL 中的每个 `?` 按顺序绑定到 `values` 里的下一个值。`execute_query` 调用多行重复 SQL 时的简洁版本——不需要为每行发明不重复的名字。
+
+所有值按 `String` 绑定；ClickHouse 在服务端把字符串强制转换为目标列类型（数值、日期等常见标量类型都能用）。如果某列无法隐式转换（例如罕见的参数化类型），回退到 `execute_query` 并使用 `{name: Type}` 显式标注。
+
+示例：
+
+```moonbit nocheck
+// 多行 INSERT —— 同一参数形状在每行重复
+ignore(conn.execute(
+  "INSERT INTO events (id, ts, msg) VALUES (?, ?, ?), (?, ?, ?)",
+  ["1", "2024-01-01 00:00:00", "hello",
+   "2", "2024-01-02 00:00:00", "world"],
+))
+
+// 单行位置绑定
+ignore(conn.execute(
+  "INSERT INTO events (id, name) VALUES (?, ?)",
+  ["42", "alice"],
 ))
 ```
 
 抛出：
 - `DbError::ServerError(code, name, message)` — 服务端返回非 2xx HTTP 响应（语法错误、表不存在、权限被拒等）
 - `DbError::ConnectionError(String)` — 网络 / I/O 错误
+
+
 
 #### `Connection::cancel`
 
