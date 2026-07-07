@@ -23,7 +23,7 @@ jobs:
 
       - name: post install
         run: |
-          moon version --native
+          moon version --all
           moon update
 
       - name: moon check
