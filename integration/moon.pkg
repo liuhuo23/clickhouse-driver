@@ -1,0 +1,6 @@
+import {
+  "moonbitlang/core/env",
+  "moonbitlang/core/test",
+  "liuhuo23/clickhouse-driver" @lib,
+  "moonbitlang/async",
+}

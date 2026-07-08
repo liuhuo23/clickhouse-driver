@@ -390,3 +390,11 @@ moon run cmd/main
 ```
 
 CLI 演示（`cmd/main/main.mbt`）依次演示 ping、参数化 SELECT、`CREATE TABLE`、带参数的内联 VALUES INSERT、带参数的 `SELECT … WHERE …`、异常处理与清理。
+
+## 集成测试（CI）
+
+单元测试：`moon test -p liuhuo23/clickhouse-driver`（离线，无需 ClickHouse）。
+
+`integration/` 下的集成测试**仅在 CI 中运行**，通过 GitHub Actions 服务容器
+启动 `clickhouse/clickhouse-server:24.8`（端口 8123）。见
+`.github/workflows/check.yml` 中的 `integration` job。

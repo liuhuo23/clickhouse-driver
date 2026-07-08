@@ -30,15 +30,54 @@ jobs:
         run: moon check --target native
 
       - name: moon test
-        run: moon test --target native
+        run: moon test -p liuhuo23/clickhouse-driver --target native
 
       - name: lint
         run: |
           moon fmt && git diff --exit-code
           moon info && git diff --exit-code
 
+  integration:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "wget -qO- http://localhost:8123/ping || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CLICKHOUSE_INTEGRATION: "1"
+      CLICKHOUSE_HOST: 127.0.0.1
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DATABASE: default
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: install-ubuntu
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> $GITHUB_PATH
+
+      - name: post install
+        run: |
+          moon version --all
+          moon update
+
+      - name: integration tests
+        run: moon test integration/ --target native
+
   publish:
-    needs: check
+    needs: [check, integration]
     runs-on: ubuntu-latest
     permissions:
       contents: read

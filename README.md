@@ -451,3 +451,19 @@ moon run cmd/main
 The CLI demo (`cmd/main/main.mbt`) walks through ping, a parameterised
 SELECT, `CREATE TABLE`, an inline-VALUES INSERT with parameters, a
 parameterised `SELECT … WHERE …`, exception handling, and cleanup.
+
+## Integration tests (CI)
+
+Unit tests: `moon test -p liuhuo23/clickhouse-driver` (offline, no ClickHouse).
+
+Integration tests in `integration/` run **only in CI** against a ClickHouse
+service container. GitHub Actions sets `CLICKHOUSE_INTEGRATION=1` and starts
+`clickhouse/clickhouse-server:24.8` on port 8123.
+
+| Workflow | Trigger | Jobs |
+| -------- | ------- | ---- |
+| `check.yml` | push/PR to `master` | `build` (unit) + `integration` (ClickHouse) |
+| `publish.yml` | push tag / manual | `check` + `integration` → `publish` |
+
+Push code or open a PR to run checks; push a tag matching `moon.mod` `version`
+to publish (requires `MOONCAKES_MOONBIT_COMMUNITY_TOKEN` secret).
