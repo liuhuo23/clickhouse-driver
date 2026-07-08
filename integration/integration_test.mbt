@@ -53,7 +53,7 @@ fn integration_conn() -> @lib.Connection raise {
   match @env.get_env_var("CLICKHOUSE_INTEGRATION") {
     None | Some("") | Some("0") | Some("false") =>
       fail(
-        "ClickHouse integration disabled. Run scripts/run_integration_tests.sh",
+        "ClickHouse integration disabled. Set CLICKHOUSE_INTEGRATION=1 in CI.",
       )
     Some(_) => ()
   }
