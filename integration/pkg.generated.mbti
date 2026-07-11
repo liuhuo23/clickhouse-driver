@@ -1,7 +1,14 @@
 // Generated using `moon info`, DON'T EDIT IT
 package "liuhuo23/clickhouse-driver/integration"
 
+import {
+  "liuhuo23/clickhouse-driver",
+}
+
 // Values
+pub fn async_runtime_loaded() -> Bool
+
+pub fn make_ci_conn(host~ : String, port~ : Int, user~ : String, password~ : String, database~ : String) -> @clickhouse-driver.Connection
 
 // Errors
 
