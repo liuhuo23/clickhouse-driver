@@ -1594,3 +1594,88 @@ test "strip_cr: removes single trailing CR" {
   assert_eq(strip_cr(""), "")
   assert_eq(strip_cr("\r"), "")
 }
+
+// ============ P1.5: ConnectionPool ============
+
+///|
+test "Connection::pool: factory copies config with default size 4" {
+  let conn = connect(
+    host="h",
+    port=8123,
+    user="u",
+    password="p",
+    database="d",
+    client_name="c",
+    timeout_ms=5000,
+    https=true,
+    compress=true,
+  )
+  let pool = conn.pool()
+  assert_eq(pool.max_size(), 4)
+  assert_eq(pool.host, "h")
+  assert_eq(pool.port, 8123)
+  assert_eq(pool.user, "u")
+  assert_eq(pool.password, "p")
+  assert_eq(pool.database, "d")
+  assert_eq(pool.client_name, "c")
+  assert_eq(pool.timeout_ms, 5000)
+  assert_eq(pool.https, true)
+  assert_eq(pool.skip_verify, false)
+  assert_eq(pool.compress, true)
+  assert_eq(pool.closed, false)
+  assert_eq(pool.idle.length(), 0)
+}
+
+///|
+test "Connection::pool: explicit size and clamping" {
+  let conn = connect(
+    host="h",
+    port=8123,
+    user="u",
+    password="p",
+    database="d",
+    client_name="c",
+  )
+  assert_eq(conn.pool(size=8).max_size(), 8)
+  assert_eq(conn.pool(size=0).max_size(), 4)
+  assert_eq(conn.pool(size=-3).max_size(), 4)
+}
+
+///|
+test "ConnectionPool::as_connection round-trips config" {
+  let conn = connect(
+    host="h",
+    port=8443,
+    user="u",
+    password="p",
+    database="d",
+    client_name="c",
+    timeout_ms=1000,
+    https=true,
+    skip_verify=true,
+    compress=true,
+  )
+  let back = conn.pool().as_connection()
+  assert_eq(back.host, "h")
+  assert_eq(back.port, 8443)
+  assert_eq(back.timeout_ms, 1000)
+  assert_eq(back.https, true)
+  assert_eq(back.skip_verify, true)
+  assert_eq(back.compress, true)
+}
+
+///|
+test "ConnectionPool::close marks closed and clears idle" {
+  let conn = connect(
+    host="h",
+    port=8123,
+    user="u",
+    password="p",
+    database="d",
+    client_name="c",
+  )
+  let pool = conn.pool()
+  pool.close()
+  assert_eq(pool.closed, true)
+  assert_eq(pool.idle.length(), 0)
+}

@@ -39,6 +39,19 @@ pub async fn Connection::execute_query(Self, String, params? : Map[String, Strin
 pub async fn Connection::execute_stream(Self, String, params? : Map[String, String]) -> ResultSetCursor
 pub async fn Connection::insert(Self, String, Array[String], Array[Array[String]], format? : InsertFormat) -> Unit
 pub async fn Connection::ping(Self) -> Unit
+pub fn Connection::pool(Self, size? : Int) -> ConnectionPool
+
+pub struct ConnectionPool {
+  // private fields
+}
+pub fn ConnectionPool::cancel(Self) -> Unit
+pub fn ConnectionPool::close(Self) -> Unit
+pub async fn ConnectionPool::execute(Self, String, Array[String]) -> ResultSet
+pub async fn ConnectionPool::execute_query(Self, String, params? : Map[String, String]) -> ResultSet
+pub async fn ConnectionPool::execute_stream(Self, String, params? : Map[String, String]) -> ResultSetCursor
+pub async fn ConnectionPool::insert(Self, String, Array[String], Array[Array[String]], format? : InsertFormat) -> Unit
+pub fn ConnectionPool::max_size(Self) -> Int
+pub async fn ConnectionPool::ping(Self) -> Unit
 
 pub(all) enum InsertFormat {
   Tsv

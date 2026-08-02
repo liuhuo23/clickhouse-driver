@@ -462,3 +462,95 @@ async test "integration: timeout raises ConnectionError" {
   // Connection is stateless: a new request (with no timeout) still works.
   conn.ping()
 }
+
+///|
+async test "integration: pool basic operations" {
+  let conn = integration_conn()
+  let pool = conn.pool(size=2)
+  defer pool.close()
+  let table = TABLE_BASE + "_pool"
+  ignore(pool.execute_query("DROP TABLE IF EXISTS " + table))
+  let ddl = "CREATE TABLE " +
+    table +
+    " (\n  id Int32,\n  name String,\n  ts DateTime\n) ENGINE = MergeTree()\nORDER BY id"
+  ignore(pool.execute_query(ddl))
+  pool.ping()
+  let rows : Array[Array[String]] = [
+    ["70", "pool-a", "2024-01-01 00:00:00"],
+    ["71", "pool-b", "2024-01-01 00:00:01"],
+  ]
+  pool.insert(table, ["id", "name", "ts"], rows)
+  ignore(
+    pool.execute("INSERT INTO " + table + " (id, name, ts) VALUES (?, ?, ?)", [
+      "72", "pool-c", "2024-01-01 00:00:02",
+    ]),
+  )
+  let r = pool.execute_query("SELECT count() AS c FROM " + table)
+  assert_eq(r.rows[0].values[0], "3")
+  ignore(pool.execute_query("DROP TABLE IF EXISTS " + table))
+}
+
+///|
+async test "integration: pool concurrency bounded by size" {
+  let conn = integration_conn()
+  let pool = conn.pool(size=2)
+  defer pool.close()
+  @async.with_task_group() <| group => {
+    for _ in 0..<4 {
+      ignore(
+        group.spawn(() => {
+          let r = pool.execute_query("SELECT number FROM numbers(500)")
+          assert_eq(r.rows.length(), 500)
+        }),
+      )
+    }
+  }
+  pool.ping()
+}
+
+///|
+async test "integration: pool execute_stream drained returns connection" {
+  let conn = integration_conn()
+  let pool = conn.pool(size=1)
+  defer pool.close()
+  let cur = pool.execute_stream("SELECT number FROM numbers(100)")
+  let mut n = 0
+  while true {
+    match cur.next() {
+      None => break
+      Some(_) => n = n + 1
+    }
+  }
+  cur.close()
+  assert_eq(n, 100)
+  // The drained connection was returned to the pool: the next query works.
+  let r = pool.execute_query("SELECT 1 AS one")
+  assert_eq(r.rows[0].values[0], "1")
+}
+
+///|
+async test "integration: pool execute_stream abandoned still usable" {
+  let conn = integration_conn()
+  let pool = conn.pool(size=1)
+  defer pool.close()
+  let cur = pool.execute_stream("SELECT number FROM numbers(1000)")
+  ignore(cur.next())
+  cur.close() // abandoned mid-stream → connection dropped, pool recovers
+  let r = pool.execute_query("SELECT 2 AS two")
+  assert_eq(r.rows[0].values[0], "2")
+}
+
+///|
+async test "integration: pool closed raises ConnectionError" {
+  let conn = integration_conn()
+  let pool = conn.pool(size=1)
+  pool.ping()
+  pool.close()
+  try {
+    ignore(pool.execute_query("SELECT 1"))
+    fail("expected ConnectionError after pool close")
+  } catch {
+    @lib.DbError::ConnectionError(msg) => assert_true(msg.contains("closed"))
+    _ => fail("expected ConnectionError after pool close")
+  }
+}

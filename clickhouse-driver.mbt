@@ -75,6 +75,13 @@ pub struct ResultSetCursor {
   priv client : @http.Client
   priv cols : Array[Column]
   priv timeout_ms : Int
+  /// Owning pool (if streamed through a `ConnectionPool`); `None` means the
+  /// cursor owns its connection directly.
+  priv pool : ConnectionPool?
+  /// Single-element cell: `true` once `next()` has reached end-of-stream, so
+  /// `close()` knows whether the connection can be reused or must be dropped.
+  /// (Array is a reference type — the flag survives value copies of the cursor.)
+  priv exhausted : Array[Bool]
 }
 
 ///|
@@ -103,7 +110,10 @@ pub async fn ResultSetCursor::next(self : ResultSetCursor) -> Row? {
       self.client.read_until("\n")
     }
     match line {
-      None => break
+      None => {
+        self.exhausted[0] = true
+        break
+      }
       Some(line) => {
         // Skip empty trailing lines (same rule as the buffered parser).
         let line = strip_cr(line)
@@ -121,9 +131,403 @@ pub async fn ResultSetCursor::next(self : ResultSetCursor) -> Row? {
 
 ///|
 /// Close the streaming cursor and release the underlying connection.
+///
+/// For cursors created through a `ConnectionPool`, a fully-drained stream
+/// returns the connection to the pool for reuse; a partially-read stream
+/// drops the connection (the server may still be streaming data).
 /// Idempotent — safe to call multiple times.
 pub fn ResultSetCursor::close(self : ResultSetCursor) -> Unit {
-  self.client.close()
+  match self.pool {
+    None => self.client.close()
+    Some(pool) =>
+      if self.exhausted[0] {
+        pool.release(self.client)
+      } else {
+        pool.discard(self.client)
+      }
+  }
+}
+
+// ============ Connection pool ============
+
+///|
+/// A pool of reusable HTTP connections.
+///
+/// `Connection` opens a fresh TCP/TLS connection for every request; a pool
+/// keeps up to `max_size` keep-alive connections and reuses them across
+/// requests, avoiding repeated handshakes (especially valuable for TLS and
+/// remote servers). All query methods mirror `Connection`.
+///
+/// The async runtime is single-threaded and cooperative, so the idle list is
+/// only touched inside short synchronous sections — no locking is needed.
+/// Requests beyond `max_size` wait for a free connection; connections that
+/// fail are discarded and replaced, never handed back to the pool.
+pub struct ConnectionPool {
+  priv host : String
+  priv port : Int
+  priv user : String
+  priv password : String
+  priv database : String
+  priv client_name : String
+  priv timeout_ms : Int
+  priv https : Bool
+  priv skip_verify : Bool
+  priv compress : Bool
+  priv max_size : Int
+  /// Bounds concurrent checked-out connections (permits == max_size).
+  priv sem : @async.Semaphore
+  /// Idle keep-alive connections ready for reuse.
+  priv idle : Array[@http.Client]
+  /// Set by `close()`; further operations close connections instead of
+  /// reusing them.
+  priv mut closed : Bool
+}
+
+///|
+/// Build a `ConnectionPool` from this connection config.
+/// `size` is the maximum number of concurrent connections (default 4;
+/// values <= 0 are clamped to 4).
+pub fn Connection::pool(self : Connection, size? : Int = 4) -> ConnectionPool {
+  ConnectionPool::new(self, size)
+}
+
+///|
+fn ConnectionPool::new(conn : Connection, size : Int) -> ConnectionPool {
+  let size = if size <= 0 { 4 } else { size }
+  {
+    host: conn.host,
+    port: conn.port,
+    user: conn.user,
+    password: conn.password,
+    database: conn.database,
+    client_name: conn.client_name,
+    timeout_ms: conn.timeout_ms,
+    https: conn.https,
+    skip_verify: conn.skip_verify,
+    compress: conn.compress,
+    max_size: size,
+    sem: @async.Semaphore(size),
+    idle: [],
+    closed: false,
+  }
+}
+
+///|
+/// No-op: pool requests are independent; kept for API symmetry with
+/// `Connection`.
+pub fn ConnectionPool::cancel(self : ConnectionPool) -> Unit {
+  ignore(self)
+}
+
+///|
+/// Close the pool: mark it closed and close all idle connections.
+/// Connections still checked out are closed when they are returned.
+pub fn ConnectionPool::close(self : ConnectionPool) -> Unit {
+  self.closed = true
+  for client in self.idle {
+    client.close()
+  }
+  self.idle.clear()
+}
+
+///|
+/// The maximum number of concurrent connections this pool will create.
+pub fn ConnectionPool::max_size(self : ConnectionPool) -> Int {
+  self.max_size
+}
+
+///|
+/// Round-trip health check through the pool.
+pub async fn ConnectionPool::ping(self : ConnectionPool) -> Unit {
+  let (status, body) = self.pool_http_request("SELECT 1", Map([]))
+  if status != 200 {
+    raise ServerError(
+      code=status,
+      name="HTTPError",
+      message=extract_error(body),
+    )
+  }
+}
+
+///|
+/// Same as `Connection::execute_query` (named `{name: Type}` params), but
+/// reuses pooled connections.
+pub async fn ConnectionPool::execute_query(
+  self : ConnectionPool,
+  sql : String,
+  params? : Map[String, String] = Map([]),
+) -> ResultSet {
+  self.do_request(apply_default_types(sql), params)
+}
+
+///|
+/// Same as `Connection::execute` (positional `?` binding), pooled.
+pub async fn ConnectionPool::execute(
+  self : ConnectionPool,
+  sql : String,
+  values : Array[String],
+) -> ResultSet {
+  let (processed_sql, params) = bind_positional(sql, values)
+  self.do_request(apply_default_types(processed_sql), params)
+}
+
+///|
+/// Same as `Connection::insert` (streamed TSV/JSONEachRow body), pooled.
+pub async fn ConnectionPool::insert(
+  self : ConnectionPool,
+  table : String,
+  columns : Array[String],
+  rows : Array[Array[String]],
+  format? : InsertFormat = Tsv,
+) -> Unit {
+  let sql = build_insert_sql(table, columns, format)
+  let conn = self.as_connection()
+  conn.run_with_timeout(() => {
+    self.insert_impl(build_url(conn, sql, Map([])), columns, rows, format)
+  })
+}
+
+///|
+/// Same as `Connection::execute_stream` (row-by-row cursor), pooled. The
+/// cursor returns its connection to the pool on `close()` when the stream was
+/// fully read, and drops it otherwise. `compress=true` is not supported for
+/// streaming.
+pub async fn ConnectionPool::execute_stream(
+  self : ConnectionPool,
+  sql : String,
+  params? : Map[String, String] = Map([]),
+) -> ResultSetCursor {
+  guard !self.compress else {
+    raise ConnectionError(
+      "execute_stream does not support compress=true; use execute_query",
+    )
+  }
+  let conn = self.as_connection()
+  conn.run_with_timeout(() => {
+    self.execute_stream_impl(apply_default_types(sql), params)
+  })
+}
+
+///|
+async fn ConnectionPool::do_request(
+  self : ConnectionPool,
+  sql : String,
+  params : Map[String, String],
+) -> ResultSet {
+  let (status, body) = self.pool_http_request(sql, params)
+  if status != 200 {
+    raise ServerError(
+      code=status,
+      name="HTTPError",
+      message=extract_error(body),
+    )
+  }
+  parse_tsv_response(body)
+}
+
+///|
+/// Send a request through a pooled connection; applies the configured timeout.
+async fn ConnectionPool::pool_http_request(
+  self : ConnectionPool,
+  query : String,
+  params : Map[String, String],
+) -> (Int, String) {
+  self
+  .as_connection()
+  .run_with_timeout(() => self.pool_http_request_impl(query, params))
+}
+
+///|
+/// Actual round-trip over a borrowed connection (no timeout wrapping).
+async fn ConnectionPool::pool_http_request_impl(
+  self : ConnectionPool,
+  query : String,
+  params : Map[String, String],
+) -> (Int, String) {
+  let conn = self.as_connection()
+  let path = build_url(conn, query, params)
+  let client = self.acquire()
+  let body_bytes : Bytes = b""
+  let body_data : &@io.Data = body_bytes
+  let response = client.post(path, body_data) catch {
+    err => {
+      self.discard(client)
+      raise err
+    }
+  }
+  let status = response.code
+  let raw = read_response_bytes(client) catch {
+    err => {
+      self.discard(client)
+      raise err
+    }
+  }
+  self.release(client)
+  let body = if self.compress {
+    decompress_clickhouse_body(raw) catch {
+      _ => raw
+    }
+  } else {
+    raw
+  }
+  (status, @utf8.decode_lossy(body))
+}
+
+///|
+/// Borrow a connection: reuse an idle one, create a new one (up to
+/// `max_size`), or wait until one is returned. Broken connections are never
+/// cached — callers use `discard` on failure.
+async fn ConnectionPool::acquire(self : ConnectionPool) -> @http.Client {
+  self.sem.acquire()
+  if self.closed {
+    self.sem.release()
+    raise ConnectionError("connection pool is closed")
+  }
+  match self.idle.pop() {
+    Some(client) => client
+    None =>
+      self.as_connection().open_client() catch {
+        err => {
+          self.sem.release()
+          raise err
+        }
+      }
+  }
+}
+
+///|
+/// Return a healthy connection to the pool for reuse.
+fn ConnectionPool::release(
+  self : ConnectionPool,
+  client : @http.Client,
+) -> Unit {
+  if self.closed {
+    client.close()
+  } else {
+    self.idle.push(client)
+  }
+  self.sem.release()
+}
+
+///|
+/// Close a broken or abandoned connection and free its pool slot.
+fn ConnectionPool::discard(
+  self : ConnectionPool,
+  client : @http.Client,
+) -> Unit {
+  client.close()
+  self.sem.release()
+}
+
+///|
+/// The equivalent `Connection` config for this pool (shares request helpers).
+fn ConnectionPool::as_connection(self : ConnectionPool) -> Connection {
+  {
+    host: self.host,
+    port: self.port,
+    user: self.user,
+    password: self.password,
+    database: self.database,
+    client_name: self.client_name,
+    timeout_ms: self.timeout_ms,
+    https: self.https,
+    skip_verify: self.skip_verify,
+    compress: self.compress,
+  }
+}
+
+///|
+/// Streaming insert over a borrowed pool connection.
+async fn ConnectionPool::insert_impl(
+  self : ConnectionPool,
+  path : String,
+  columns : Array[String],
+  rows : Array[Array[String]],
+  format : InsertFormat,
+) -> Unit {
+  let client = self.acquire()
+  let status = try {
+    client.request(@http.RequestMethod::Post, path)
+    for row in rows {
+      let row_bytes = encode_row(columns, row, format)
+      let row_data : &@io.Data = row_bytes
+      client.write(row_data)
+    }
+    client.flush()
+    client.end_request().code
+  } catch {
+    err => {
+      self.discard(client)
+      raise err
+    }
+  }
+  if status != 200 {
+    let body = read_response_body(client)
+    self.discard(client)
+    raise ServerError(
+      code=status,
+      name="HTTPError",
+      message=extract_error(body),
+    )
+  }
+  self.release(client)
+}
+
+///|
+/// Streaming cursor setup over a borrowed pool connection.
+async fn ConnectionPool::execute_stream_impl(
+  self : ConnectionPool,
+  sql : String,
+  params : Map[String, String],
+) -> ResultSetCursor {
+  let conn = self.as_connection()
+  let path = build_url(conn, sql, params)
+  let client = self.acquire()
+  let body_bytes : Bytes = b""
+  let body_data : &@io.Data = body_bytes
+  let response = client.post(path, body_data) catch {
+    err => {
+      self.discard(client)
+      raise err
+    }
+  }
+  if response.code != 200 {
+    let body = read_response_body(client)
+    self.discard(client)
+    raise ServerError(
+      code=response.code,
+      name="HTTPError",
+      message=extract_error(body),
+    )
+  }
+  let names_line = match client.read_until("\n") {
+    None => {
+      self.discard(client)
+      raise ConnectionError("empty response from server")
+    }
+    Some(line) => strip_cr(line)
+  }
+  let types_line = match client.read_until("\n") {
+    None => {
+      self.discard(client)
+      raise ConnectionError("missing type header from server")
+    }
+    Some(line) => strip_cr(line)
+  }
+  let names = split_tsv_line(names_line)
+  let types = split_tsv_line(types_line)
+  let cols : Array[Column] = []
+  for i in 0..<names.length() {
+    let typ = if i < types.length() { types[i] } else { "" }
+    cols.push({ name: names[i], type_: typ })
+  }
+  {
+    client,
+    cols,
+    timeout_ms: self.timeout_ms,
+    pool: Some(self),
+    exhausted: [false],
+  }
 }
 
 // ============ Errors ============
@@ -434,7 +838,7 @@ async fn Connection::open_client(self : Connection) -> @http.Client {
 fn Connection::common_headers(self : Connection) -> Map[String, String] {
   let headers : Map[String, String] = Map::Map([])
   headers.set("Authorization", basic_auth_header(self.user, self.password))
-  headers.set("Connection", "close")
+  // No `Connection: close` — keep-alive lets `ConnectionPool` reuse sockets.
   headers.set("X-ClickHouse-Client-Name", self.client_name)
   headers
 }
@@ -520,7 +924,7 @@ async fn Connection::execute_stream_impl(
     let typ = if i < types.length() { types[i] } else { "" }
     cols.push({ name: names[i], type_: typ })
   }
-  { client, cols, timeout_ms: self.timeout_ms }
+  { client, cols, timeout_ms: self.timeout_ms, pool: None, exhausted: [false] }
 }
 
 ///|
