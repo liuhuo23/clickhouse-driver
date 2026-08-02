@@ -81,8 +81,7 @@ fn integration_conn() -> @lib.Connection raise {
 ///|
 async fn setup_table(conn : @lib.Connection, table : String) -> Unit {
   ignore(conn.execute_query("DROP TABLE IF EXISTS " + table))
-  let ddl =
-    "CREATE TABLE " +
+  let ddl = "CREATE TABLE " +
     table +
     " (\n" +
     "  id   Int32,\n" +
@@ -96,6 +95,35 @@ async fn setup_table(conn : @lib.Connection, table : String) -> Unit {
 ///|
 async fn teardown_table(conn : @lib.Connection, table : String) -> Unit {
   ignore(conn.execute_query("DROP TABLE IF EXISTS " + table))
+}
+
+///|
+/// True when the server's `{name: Identifier}` HTTP parameter substitution is
+/// available (ClickHouse >= 24.12). Older servers require `{name: String}`
+/// even for identifiers.
+async fn supports_identifier_param(conn : @lib.Connection) -> Bool {
+  try {
+    let r = conn.execute_query("SELECT version() AS v")
+    if r.rows.length() == 0 {
+      return false
+    }
+    let version = r.rows[0].values[0]
+    let mut major = 0
+    for ch in version.iter() {
+      if ch == '.' {
+        break
+      }
+      let c = ch.to_int() - '0'.to_int()
+      if c >= 0 && c <= 9 {
+        major = major * 10 + c
+      } else {
+        break
+      }
+    }
+    major >= 25
+  } catch {
+    _ => false
+  }
 }
 
 ///|
@@ -173,7 +201,9 @@ async test "integration: update rows" {
   )
   ignore(
     conn.execute_query(
-      "ALTER TABLE " + table + " UPDATE name = {n} WHERE id = {id: Int32}",
+      "ALTER TABLE " +
+      table +
+      " UPDATE name = {n} WHERE id = {id: Int32} SETTINGS mutations_sync = 2",
       params=Map::from_array([("n", "after"), ("id", "1")]),
     ),
   )
@@ -194,8 +224,15 @@ async test "integration: table name param" {
       "7", "seven", "2024-03-03 03:03:03",
     ]),
   )
+  // ClickHouse >= 25 requires `{name: Identifier}` for identifiers; older
+  // versions accept the untyped `{tn}` form (defaulted to String).
+  let placeholder = if supports_identifier_param(conn) {
+    "{tn: Identifier}"
+  } else {
+    "{tn}"
+  }
   let r = conn.execute_query(
-    "SELECT count() AS c FROM {tn}",
+    "SELECT count() AS c FROM " + placeholder,
     params=Map::from_array([("tn", table)]),
   )
   assert_eq(r.rows[0].values[0], "1")
