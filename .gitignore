@@ -8,3 +8,5 @@ target
 .deepseek/
 docs/
 scripts/
+.pi/
+.pi-mind/

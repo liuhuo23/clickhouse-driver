@@ -44,14 +44,11 @@ jobs:
           moon fmt && git diff --exit-code
           moon info && git diff --exit-code
 
-  # Real-environment integration tests on every supported OS.
-  # `services:` is Linux-only; docker run inside a step is portable.
+  # Real-environment integration tests.
+  # Docker is only preinstalled on Linux runners; GitHub-hosted
+  # macOS images do not ship Docker (licensing).
   integration:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read

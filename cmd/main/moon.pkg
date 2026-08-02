@@ -3,6 +3,4 @@ import {
   "liuhuo23/clickhouse-driver" @lib,
 }
 
-options(
-  "is-main": true,
-)
+pkgtype(kind: "executable")

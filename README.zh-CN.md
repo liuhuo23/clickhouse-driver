@@ -8,7 +8,11 @@ MoonBit 实现的 ClickHouse **HTTP** 协议驱动——简单、无状态，当
 
 - 使用 ClickHouse 原生 HTTP 接口（默认端口 **8123**）
 - 响应以 **TabSeparatedWithNamesAndTypes** 解析，列名和类型自动返回，客户端无需手动类型映射
-- 单一统一 API：`execute_query(sql, params?)` 覆盖 SELECT、DDL、内联 VALUES INSERT
+- **批量插入**：`insert()` 将行数据（TSV 或 JSONEachRow）作为 HTTP 请求体流式发送，不再把 VALUES 字面量内联进 SQL
+- **流式读取**：`execute_stream()` 返回逐行游标，大结果集无需整体载入内存
+- **TLS**：`https=true` 走 TLS 连接；`skip_verify=true` 可跳过证书校验（自签名场景）
+- **请求超时**：`timeout_ms` 约束每个请求（以及流式 `next()`），超时抛 `ConnectionError`
+- **响应压缩**：`compress=true` 请求 ClickHouse LZ4 压缩（`compress=1`），驱动自动解压
 - 两种参数绑定方式，均基于 ClickHouse 原生 `{name: Type}` 占位符协议：
   - `execute_query(sql, params?)` — **命名**绑定，使用 `{name}` / `{name: Type}`。
     无类型 `{name}` 默认为 `String`，所以表名、标识符、字符串列名书写更自然。
@@ -108,26 +112,34 @@ async fn main {
 ### `connect`
 
 ```moonbit nocheck
-pub async fn connect(
+pub fn connect(
   host~ : String,
   port~ : Int,
   user~ : String,
   password~ : String,
   database~ : String,
   client_name~ : String,
+  timeout_ms? : Int = 0,
+  https? : Bool = false,
+  skip_verify? : Bool = false,
+  compress? : Bool = false,
 ) -> Connection
 ```
 
-根据显式参数构造 `Connection` 配置。**不会**建立 TCP 连接——调用是无状态的，每次请求都会建立新的 HTTP 连接。
+根据显式参数构造 `Connection` 配置。**不会**建立 TCP 连接——调用是无状态的，每次请求都会建立新的 HTTP 连接。所有新选项均为可选，旧调用方式保持不变。
 
-| 参数         | 类型     | 说明                  |
-| ------------ | -------- | --------------------- |
-| `host`       | `String` | 服务器主机名或 IP     |
-| `port`       | `Int`    | HTTP 端口（默认 8123）|
-| `user`       | `String` | 用户名                |
-| `password`   | `String` | 密码                  |
-| `database`   | `String` | 默认数据库            |
-| `client_name`| `String` | 通过 `X-ClickHouse-Client-Name` header 发送 |
+| 参数          | 类型     | 说明                                        |
+| ------------- | -------- | ------------------------------------------- |
+| `host`        | `String` | 服务器主机名或 IP                           |
+| `port`        | `Int`    | HTTP 端口（默认 8123）                      |
+| `user`        | `String` | 用户名                                      |
+| `password`    | `String` | 密码                                        |
+| `database`    | `String` | 默认数据库                                  |
+| `client_name` | `String` | 通过 `X-ClickHouse-Client-Name` header 发送 |
+| `timeout_ms`  | `Int`    | 单请求超时（毫秒）；`0` = 不超时             |
+| `https`       | `Bool`   | 使用 TLS（`https://`）；默认 `false`        |
+| `skip_verify` | `Bool`   | 跳过 TLS 证书校验；默认 `false`             |
+| `compress`    | `Bool`   | 请求 ClickHouse LZ4 压缩；默认 `false`      |
 
 ### `Connection`
 
@@ -139,6 +151,10 @@ pub struct Connection {
   password : String
   database : String
   client_name : String
+  timeout_ms : Int
+  https : Bool
+  skip_verify : Bool
+  compress : Bool
 }
 ```
 
@@ -223,6 +239,47 @@ ignore(conn.execute(
 - `DbError::ConnectionError(String)` — 网络 / I/O 错误
 
 
+
+#### `Connection::insert`
+
+```moonbit nocheck
+pub async fn insert(
+  self : Connection,
+  table : String,
+  columns : Array[String],
+  rows : Array[Array[String]],
+  format? : InsertFormat = Tsv,
+) -> Unit raise
+```
+
+将批量插入的数据作为 HTTP 请求体流式发送（不再把 VALUES 字面量内联进 SQL）。body 分块流式传输，大批量插入不会撑爆 SQL 文本。`format` 可选 `Tsv`（默认，`FORMAT TSV`）或 `Ndjson`（`FORMAT JSONEachRow`，每行一个 JSON 对象）；值以文本形式发送，由 ClickHouse 自动转换类型。
+
+```moonbit nocheck
+conn.insert("users", ["id", "name"], [["1", "alice"], ["2", "bob"]])
+```
+
+#### `Connection::execute_stream`
+
+```moonbit nocheck
+pub async fn execute_stream(
+  self : Connection,
+  sql : String,
+  params? : Map[String, String] = {},
+) -> ResultSetCursor raise
+```
+
+执行查询并返回**流式游标**，响应体逐行惰性读取——适合大结果集 SELECT。`columns()` 立即可用；`next()` 逐行返回直到 `None`；务必 `close()` 释放连接。与 `compress=true` 暂不兼容。
+
+```moonbit nocheck
+let cur = conn.execute_stream("SELECT * FROM events")
+defer cur.close()
+while true {
+  match cur.next() {
+    None => break
+    Some(row) => println(row.values)
+  }
+}
+```
 
 #### `Connection::cancel`
 
@@ -378,10 +435,11 @@ ClickHouse 以 `TabSeparatedWithNamesAndTypes` 响应：
 
 ## 局限性
 
-1. **无流式 / 进度回调** — HTTP 在关闭连接前返回完整结果。无法流式获取部分结果或逐行进度回调。
-2. **无法在查询中途取消** — 请求一旦发出，驱动就失去句柄。需要取消请断开连接。
-3. **仅内联 VALUES** — 批量插入（≫ 几千行）应切换到 ClickHouse 原生 TCP 协议，或使用支持 body 流式传输的 HTTP 插入 API（POST + `application/x-ndjson`）。本驱动保持最简形式：SQL 含字面 VALUES，字面值来自 `params`。
-4. **响应体大小限制** — `read_response_body` 强制 256 MB 上限以防止内存失控。返回更大的查询应使用过滤或聚合。
+1. **无法在查询中途取消** — 请求一旦发出，驱动就失去句柄。需要取消请断开连接。
+2. **流式读取仅限游标** — `execute_stream()` 逐行惰性读取，但 `execute_query()` 仍会缓冲完整结果（上限 256 MB），因为解压与文本解析需要完整响应体。
+3. **压缩与流式暂不兼容** — `compress=true` 时 `execute_stream()` 抛 `ConnectionError`；压缩响应请用 `execute_query()`。
+4. **响应体大小限制** — 缓冲式响应上限 256 MB。超大结果请用过滤、聚合或 `execute_stream()`。
+5. **插入无进度/重试** — `insert()` 一次性流式发送 body；失败需要整体重试。
 
 ## 运行示例 CLI
 
@@ -389,7 +447,7 @@ ClickHouse 以 `TabSeparatedWithNamesAndTypes` 响应：
 moon run cmd/main
 ```
 
-CLI 演示（`cmd/main/main.mbt`）依次演示 ping、参数化 SELECT、`CREATE TABLE`、带参数的内联 VALUES INSERT、带参数的 `SELECT … WHERE …`、异常处理与清理。
+CLI 演示（`cmd/main/main.mbt`）依次演示 ping、参数化 SELECT、`CREATE TABLE`、`execute()`（内联 VALUES）与 `insert()`（流式 TSV body）、`execute_stream()`、异常处理与清理。
 
 ## 集成测试（CI）
 

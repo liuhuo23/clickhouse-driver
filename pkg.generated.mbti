@@ -6,7 +6,7 @@ import {
 }
 
 // Values
-pub fn connect(host~ : String, port~ : Int, user~ : String, password~ : String, database~ : String, client_name~ : String) -> Connection
+pub fn connect(host~ : String, port~ : Int, user~ : String, password~ : String, database~ : String, client_name~ : String, timeout_ms? : Int, https? : Bool, skip_verify? : Bool, compress? : Bool) -> Connection
 
 // Errors
 pub suberror DbError {
@@ -27,18 +27,36 @@ pub struct Connection {
   password : String
   database : String
   client_name : String
+  timeout_ms : Int
+  https : Bool
+  skip_verify : Bool
+  compress : Bool
 }
 pub fn Connection::cancel(Self) -> Unit
 pub fn Connection::close(Self) -> Unit
 pub async fn Connection::execute(Self, String, Array[String]) -> ResultSet
 pub async fn Connection::execute_query(Self, String, params? : Map[String, String]) -> ResultSet
+pub async fn Connection::execute_stream(Self, String, params? : Map[String, String]) -> ResultSetCursor
+pub async fn Connection::insert(Self, String, Array[String], Array[Array[String]], format? : InsertFormat) -> Unit
 pub async fn Connection::ping(Self) -> Unit
+
+pub(all) enum InsertFormat {
+  Tsv
+  Ndjson
+}
 
 pub struct ResultSet {
   columns : Array[Column]
   rows : Array[Row]
 }
 pub fn ResultSet::to_map(Self) -> Array[Map[String, String]]
+
+pub struct ResultSetCursor {
+  // private fields
+}
+pub fn ResultSetCursor::close(Self) -> Unit
+pub fn ResultSetCursor::columns(Self) -> Array[Column]
+pub async fn ResultSetCursor::next(Self) -> Row?
 
 pub struct Row {
   values : Array[String]

@@ -6,7 +6,10 @@
 using @test {assert_eq}
 
 ///|
-const TABLE = "moonbit_drv_it"
+/// Base name for test tables. Every test that creates a table uses its own
+/// suffixed name, because the test runner executes tests concurrently — a
+/// shared table would race (DROP/CREATE/INSERT interleavings).
+const TABLE_BASE = "moonbit_drv_it"
 
 ///|
 fn parse_int(s : String, fallback : Int) -> Int {
@@ -76,21 +79,23 @@ fn integration_conn() -> @lib.Connection raise {
 }
 
 ///|
-async fn setup_table(conn : @lib.Connection) -> Unit {
-  ignore(conn.execute_query("DROP TABLE IF EXISTS " + TABLE))
+async fn setup_table(conn : @lib.Connection, table : String) -> Unit {
+  ignore(conn.execute_query("DROP TABLE IF EXISTS " + table))
   let ddl =
-    #|CREATE TABLE moonbit_drv_it (
-    #|  id   Int32,
-    #|  name String,
-    #|  ts   DateTime
-    #|) ENGINE = MergeTree()
-    #|ORDER BY id
+    "CREATE TABLE " +
+    table +
+    " (\n" +
+    "  id   Int32,\n" +
+    "  name String,\n" +
+    "  ts   DateTime\n" +
+    ") ENGINE = MergeTree()\n" +
+    "ORDER BY id"
   ignore(conn.execute_query(ddl))
 }
 
 ///|
-async fn teardown_table(conn : @lib.Connection) -> Unit {
-  ignore(conn.execute_query("DROP TABLE IF EXISTS " + TABLE))
+async fn teardown_table(conn : @lib.Connection, table : String) -> Unit {
+  ignore(conn.execute_query("DROP TABLE IF EXISTS " + table))
 }
 
 ///|
@@ -133,15 +138,16 @@ async test "integration: execute_query named params" {
 async test "integration: ddl insert select to_map" {
   let conn = integration_conn()
   defer conn.close()
-  setup_table(conn)
+  let table = TABLE_BASE + "_map"
+  setup_table(conn, table)
   ignore(
     conn.execute(
-      "INSERT INTO moonbit_drv_it (id, name, ts) VALUES (?, ?, ?), (?, ?, ?)",
+      "INSERT INTO " + table + " (id, name, ts) VALUES (?, ?, ?), (?, ?, ?)",
       ["1", "alice", "2024-01-01 00:00:00", "2", "bob", "2024-01-02 00:00:00"],
     ),
   )
   let r = conn.execute_query(
-    "SELECT id, name, ts FROM moonbit_drv_it WHERE id >= {lo: Int32} ORDER BY id",
+    "SELECT id, name, ts FROM " + table + " WHERE id >= {lo: Int32} ORDER BY id",
     params=Map::from_array([("lo", "0")]),
   )
   assert_eq(r.rows.length(), 2)
@@ -151,47 +157,49 @@ async test "integration: ddl insert select to_map" {
   assert_eq(maps.length(), 2)
   assert_eq(maps[0]["name"], "alice")
   assert_eq(maps[1]["id"], "2")
-  teardown_table(conn)
+  teardown_table(conn, table)
 }
 
 ///|
 async test "integration: update rows" {
   let conn = integration_conn()
   defer conn.close()
-  setup_table(conn)
+  let table = TABLE_BASE + "_upd"
+  setup_table(conn, table)
   ignore(
-    conn.execute("INSERT INTO moonbit_drv_it (id, name, ts) VALUES (?, ?, ?)", [
+    conn.execute("INSERT INTO " + table + " (id, name, ts) VALUES (?, ?, ?)", [
       "1", "before", "2024-01-01 00:00:00",
     ]),
   )
   ignore(
     conn.execute_query(
-      "ALTER TABLE moonbit_drv_it UPDATE name = {n} WHERE id = {id: Int32}",
+      "ALTER TABLE " + table + " UPDATE name = {n} WHERE id = {id: Int32}",
       params=Map::from_array([("n", "after"), ("id", "1")]),
     ),
   )
-  let r = conn.execute_query("SELECT name FROM moonbit_drv_it WHERE id = 1")
+  let r = conn.execute_query("SELECT name FROM " + table + " WHERE id = 1")
   assert_eq(r.rows.length(), 1)
   assert_eq(r.rows[0].values[0], "after")
-  teardown_table(conn)
+  teardown_table(conn, table)
 }
 
 ///|
 async test "integration: table name param" {
   let conn = integration_conn()
   defer conn.close()
-  setup_table(conn)
+  let table = TABLE_BASE + "_tbl"
+  setup_table(conn, table)
   ignore(
-    conn.execute("INSERT INTO moonbit_drv_it (id, name, ts) VALUES (?, ?, ?)", [
+    conn.execute("INSERT INTO " + table + " (id, name, ts) VALUES (?, ?, ?)", [
       "7", "seven", "2024-03-03 03:03:03",
     ]),
   )
   let r = conn.execute_query(
     "SELECT count() AS c FROM {tn}",
-    params=Map::from_array([("tn", TABLE)]),
+    params=Map::from_array([("tn", table)]),
   )
   assert_eq(r.rows[0].values[0], "1")
-  teardown_table(conn)
+  teardown_table(conn, table)
 }
 
 ///|
@@ -234,5 +242,186 @@ async test "integration: ping after errors" {
   ignore(conn.execute_query("SLECT 1")) catch {
     _ => ()
   }
+  conn.ping()
+}
+
+///|
+async test "integration: insert TSV bulk rows" {
+  let conn = integration_conn()
+  defer conn.close()
+  let table = TABLE_BASE + "_bulk"
+  setup_table(conn, table)
+  let rows : Array[Array[String]] = [
+    ["10", "ten", "2024-01-01 00:00:00"],
+    ["11", "eleven", "2024-01-01 00:00:01"],
+    ["12", "twelve", "2024-01-01 00:00:02"],
+  ]
+  conn.insert(table, ["id", "name", "ts"], rows)
+  let r = conn.execute_query("SELECT count() AS c FROM " + table)
+  assert_eq(r.rows[0].values[0], "3")
+  teardown_table(conn, table)
+}
+
+///|
+async test "integration: insert TSV with escaped values" {
+  let conn = integration_conn()
+  defer conn.close()
+  let table = TABLE_BASE + "_esc"
+  setup_table(conn, table)
+  let rows : Array[Array[String]] = [
+    ["20", "tab\tinside", "2024-01-01 00:00:00"],
+    ["21", "line\ninside", "2024-01-01 00:00:01"],
+  ]
+  conn.insert(table, ["id", "name", "ts"], rows)
+  let r = conn.execute_query("SELECT name FROM " + table + " WHERE id = 20")
+  assert_eq(r.rows[0].values[0], "tab\tinside")
+  let r2 = conn.execute_query("SELECT name FROM " + table + " WHERE id = 21")
+  assert_eq(r2.rows[0].values[0], "line\ninside")
+  teardown_table(conn, table)
+}
+
+///|
+async test "integration: insert JSONEachRow (Ndjson)" {
+  let conn = integration_conn()
+  defer conn.close()
+  let table = TABLE_BASE + "_nd"
+  setup_table(conn, table)
+  let rows : Array[Array[String]] = [
+    ["30", "thirty", "2024-01-01 00:00:00"],
+    ["31", "thirty one", "2024-01-01 00:00:01"],
+  ]
+  conn.insert(
+    table,
+    ["id", "name", "ts"],
+    rows,
+    format=@lib.InsertFormat::Ndjson,
+  )
+  let r = conn.execute_query("SELECT count() AS c FROM " + table)
+  assert_eq(r.rows[0].values[0], "2")
+  teardown_table(conn, table)
+}
+
+///|
+async test "integration: execute_stream rows" {
+  let conn = integration_conn()
+  defer conn.close()
+  let table = TABLE_BASE + "_str"
+  setup_table(conn, table)
+  let rows : Array[Array[String]] = [
+    ["40", "a", "2024-01-01 00:00:00"],
+    ["41", "b", "2024-01-01 00:00:01"],
+    ["42", "c", "2024-01-01 00:00:02"],
+  ]
+  conn.insert(table, ["id", "name", "ts"], rows)
+  let cur = conn.execute_stream(
+    "SELECT id, name FROM " + table + " ORDER BY id",
+  )
+  defer cur.close()
+  assert_eq(cur.columns().length(), 2)
+  let seen : Array[String] = []
+  while true {
+    match cur.next() {
+      None => break
+      Some(row) => seen.push(row.values[0])
+    }
+  }
+  assert_eq(seen.length(), 3)
+  assert_eq(seen[0], "40")
+  assert_eq(seen[2], "42")
+  teardown_table(conn, table)
+}
+
+///|
+async test "integration: execute_stream with named params" {
+  let conn = integration_conn()
+  defer conn.close()
+  let table = TABLE_BASE + "_strp"
+  setup_table(conn, table)
+  let rows : Array[Array[String]] = [
+    ["50", "x", "2024-01-01 00:00:00"],
+    ["51", "y", "2024-01-01 00:00:01"],
+  ]
+  conn.insert(table, ["id", "name", "ts"], rows)
+  let cur = conn.execute_stream(
+    "SELECT id FROM " + table + " WHERE id >= {lo: Int32} ORDER BY id",
+    params=Map::from_array([("lo", "51")]),
+  )
+  defer cur.close()
+  let ids : Array[String] = []
+  while true {
+    match cur.next() {
+      None => break
+      Some(row) => ids.push(row.values[0])
+    }
+  }
+  assert_eq(ids, ["51"])
+  teardown_table(conn, table)
+}
+
+///|
+async test "integration: execute_stream close before draining" {
+  let conn = integration_conn()
+  defer conn.close()
+  let table = TABLE_BASE + "_strc"
+  setup_table(conn, table)
+  let rows : Array[Array[String]] = [
+    ["60", "a", "2024-01-01 00:00:00"],
+    ["61", "b", "2024-01-01 00:00:01"],
+  ]
+  conn.insert(table, ["id", "name", "ts"], rows)
+  let cur = conn.execute_stream("SELECT id FROM " + table)
+  // Read one row then abandon the rest — close() must not hang.
+  ignore(cur.next())
+  cur.close()
+  conn.ping()
+  teardown_table(conn, table)
+}
+
+///|
+async test "integration: compress=1 response is decompressed" {
+  let conn = integration_conn()
+  let c = @lib.connect(
+    host=conn.host,
+    port=conn.port,
+    user=conn.user,
+    password=conn.password,
+    database=conn.database,
+    client_name="moonbit-integration-test",
+    compress=true,
+  )
+  defer c.close()
+  // ~2MB of low-entropy data — spans multiple 1MB compressed blocks, so the
+  // frame parser (16B checksum + 9B header per block) is exercised for real.
+  let r = c.execute_query(
+    "SELECT number, randomPrintableASCII(100) FROM numbers(20000)",
+  )
+  assert_eq(r.rows.length(), 20000)
+  assert_eq(r.rows[0].values[0], "0")
+  assert_eq(r.rows[19999].values[0], "19999")
+  assert_true(r.rows[0].values[1].length() > 0)
+}
+
+///|
+async test "integration: timeout raises ConnectionError" {
+  let conn = integration_conn()
+  let c = @lib.connect(
+    host=conn.host,
+    port=conn.port,
+    user=conn.user,
+    password=conn.password,
+    database=conn.database,
+    client_name="moonbit-integration-test",
+    timeout_ms=1,
+  )
+  defer c.close()
+  try {
+    // sleep() makes the query run much longer than the 1ms budget.
+    ignore(c.execute_query("SELECT sleep(3)"))
+    fail("expected ConnectionError on timeout")
+  } catch {
+    @lib.DbError::ConnectionError(msg) => assert_true(msg.contains("timed out"))
+    _ => fail("expected ConnectionError")
+  }
+  // Connection is stateless: a new request (with no timeout) still works.
   conn.ping()
 }

@@ -24,6 +24,16 @@ Linux and macOS today.
   (`ServerError` / `ConnectionError`).
 - Every call opens a short-lived HTTP connection — no persistent state to
   leak, no need to reconnect after long idle periods.
+- **Real batch inserts** — `insert()` streams the row data (TSV or
+  JSONEachRow) as the HTTP request body instead of inlining VALUES literals.
+- **Streaming reads** — `execute_stream()` returns a row-by-row cursor, so
+  large result sets don't have to fit in memory.
+- **TLS** — `https=true` connects over TLS; `skip_verify=true` disables
+  certificate verification for self-signed setups.
+- **Request timeouts** — `timeout_ms` bounds every request (and each
+  streaming `next()`), raising `ConnectionError` on timeout.
+- **Response compression** — `compress=true` asks ClickHouse for LZ4
+  (`compress=1`); the driver decompresses automatically.
 - Compatible with ClickHouse 22.x+ (the HTTP interface has been stable since
   21.x).
 
@@ -111,6 +121,23 @@ async fn main {
       ["1", "alice", "2", "bob"],
     ),
   )
+
+  // 7. Bulk insert — streamed as the HTTP body (TSV by default).
+  conn.insert(
+    "users",
+    ["id", "name"],
+    [["3", "carol"], ["4", "dave"]],
+  )
+
+  // 8. Streaming read — one row at a time, no full buffering.
+  let cur = conn.execute_stream("SELECT id, name FROM users")
+  defer cur.close()
+  while true {
+    match cur.next() {
+      None => break
+      Some(row) => println(row.values)
+    }
+  }
 }
 ```
 
@@ -119,28 +146,37 @@ async fn main {
 ### `connect`
 
 ```moonbit nocheck
-pub async fn connect(
+pub fn connect(
   host~ : String,
   port~ : Int,
   user~ : String,
   password~ : String,
   database~ : String,
   client_name~ : String,
+  timeout_ms? : Int = 0,
+  https? : Bool = false,
+  skip_verify? : Bool = false,
+  compress? : Bool = false,
 ) -> Connection
 ```
 
 Builds a `Connection` config from explicit parameters. Does **not** open a
 TCP connection — calls are stateless and open fresh HTTP connections per
-request.
+request. All new options are optional, so existing call sites keep working
+unchanged.
 
-| Parameter    | Type     | Description                            |
-| ------------ | -------- | -------------------------------------- |
-| `host`       | `String` | Server hostname or IP                 |
-| `port`       | `Int`    | HTTP port (default `8123`)             |
-| `user`       | `String` | Username                               |
-| `password`   | `String` | Password                               |
-| `database`   | `String` | Default database                       |
-| `client_name`| `String` | Sent via `X-ClickHouse-Client-Name` header |
+| Parameter      | Type     | Description                                        |
+| -------------- | -------- | -------------------------------------------------- |
+| `host`         | `String` | Server hostname or IP                              |
+| `port`         | `Int`    | HTTP port (default `8123`)                         |
+| `user`         | `String` | Username                                           |
+| `password`     | `String` | Password                                           |
+| `database`     | `String` | Default database                                   |
+| `client_name`  | `String` | Sent via `X-ClickHouse-Client-Name` header         |
+| `timeout_ms`   | `Int`    | Per-request timeout in ms; `0` = no timeout        |
+| `https`        | `Bool`   | Use TLS (`https://`); default `false`              |
+| `skip_verify`  | `Bool`   | Skip TLS cert verification; default `false`        |
+| `compress`     | `Bool`   | Request ClickHouse LZ4 compression; default `false`|
 
 ### `Connection`
 
@@ -152,6 +188,10 @@ pub struct Connection {
   password : String
   database : String
   client_name : String
+  timeout_ms : Int
+  https : Bool
+  skip_verify : Bool
+  compress : Bool
 }
 ```
 
@@ -249,6 +289,74 @@ Raises:
 - `DbError::ServerError(code, name, message)` — the server returned a
   non-2xx HTTP response (syntax error, unknown table, permission denied, …).
 - `DbError::ConnectionError(String)` — network / I/O error.
+
+#### `Connection::insert`
+
+```moonbit nocheck
+pub async fn insert(
+  self : Connection,
+  table : String,
+  columns : Array[String],
+  rows : Array[Array[String]],
+  format? : InsertFormat = Tsv,
+) -> Unit raise
+```
+
+Streams a batch insert to the server as the HTTP request body, instead of
+inlining rows as VALUES literals in the SQL text. This is the right tool for
+bulk loading — the body is streamed in chunks, so large inserts do not blow
+up the SQL text size.
+
+- `table` / `columns` are interpolated verbatim into the SQL — quote
+  identifiers yourself if needed.
+- Each element of `rows` is one row whose fields map positionally to
+  `columns`. Values are sent as text and coerced by ClickHouse.
+- `format` selects the wire format: `Tsv` (default, `FORMAT TSV`) or
+  `Ndjson` (`FORMAT JSONEachRow`, one JSON object per line).
+
+```moonbit nocheck
+conn.insert(
+  "users",
+  ["id", "name", "created_at"],
+  [
+    ["1", "alice", "2024-01-01 00:00:00"],
+    ["2", "bob",   "2024-01-02 00:00:00"],
+  ],
+)
+```
+
+#### `Connection::execute_stream`
+
+```moonbit nocheck
+pub async fn execute_stream(
+  self : Connection,
+  sql : String,
+  params? : Map[String, String] = {},
+) -> ResultSetCursor raise
+```
+
+Executes a query and returns a **streaming cursor** over the result rows.
+Unlike `execute_query` (which buffers the whole result set in memory), the
+response body is consumed lazily, one row at a time — ideal for large
+SELECTs.
+
+```moonbit nocheck
+let cur = conn.execute_stream("SELECT * FROM events")
+defer cur.close()
+let cols = cur.columns()  // schema is available immediately
+while true {
+  match cur.next() {
+    None => break
+    Some(row) => println(row.values)
+  }
+}
+```
+
+`params` works exactly like `execute_query`. Always call `close()` (e.g. via
+`defer`) to release the underlying HTTP connection. If the connection was
+configured with `timeout_ms`, each `next()` call is also bounded by it.
+Streaming is not supported together with `compress=true` (raises
+`ConnectionError`) — use `execute_query` for compressed responses.
 
 #### `Connection::cancel`
 
@@ -427,20 +535,20 @@ This is an **original project**. It references the [ClickHouse HTTP interface do
 
 ## Limitations
 
-1. **Streaming / progress callbacks** — HTTP returns the full result
-   before the connection closes. There is no way to stream partial results
-   or receive row-by-row progress callbacks.
-2. **No mid-query cancel** — once a request is sent, the driver has no
+1. **No mid-query cancel** — once a request is sent, the driver has no
    handle to cancel it. Drop the connection if you must abort.
-3. **Inline-VALUES only** — large bulk inserts (≫ a few thousand rows)
-   should switch to ClickHouse's native TCP protocol for the actual data
-   transfer, or use the `client_name` HTTP insert API which supports a
-   body-streaming variant via POST with content-type `application/x-ndjson`.
-   This driver sticks to the simplest form: SQL with literal VALUES, with
-   the literals coming from `params`.
-4. **Response body size limit** — `read_response_body` enforces a 256 MB
-   cap to avoid runaway memory. Queries returning more should use filters or
-   aggregation.
+2. **Streaming reads are cursor-only** — `execute_stream()` streams rows
+   lazily, but `execute_query()` still buffers the full result (capped at
+   256 MB) because the driver needs the complete body for LZ4 decompression
+   and text parsing.
+3. **Compression + streaming don't mix yet** — `execute_stream()` raises
+   `ConnectionError` when `compress=true`; use `execute_query()` for
+   compressed responses.
+4. **Response body size limit** — buffered responses are capped at 256 MB
+   to avoid runaway memory. Queries returning more should use filters,
+   aggregation, or `execute_stream()`.
+5. **No insert progress / retries** — `insert()` streams the body in one
+   shot; on failure the whole request must be retried.
 
 ## Run the example CLI
 
@@ -449,8 +557,8 @@ moon run cmd/main
 ```
 
 The CLI demo (`cmd/main/main.mbt`) walks through ping, a parameterised
-SELECT, `CREATE TABLE`, an inline-VALUES INSERT with parameters, a
-parameterised `SELECT … WHERE …`, exception handling, and cleanup.
+SELECT, `CREATE TABLE`, `execute()` (inline VALUES) and `insert()` (streamed
+TSV body), `execute_stream()`, exception handling, and cleanup.
 
 ## Integration tests (CI)
 

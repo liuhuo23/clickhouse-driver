@@ -1,9 +1,51 @@
 ///|
-/// ClickHouse HTTP driver demo: comprehensive test of v0.4 features.
+/// Parse a string as Int (best effort), returning 0 on failure.
+fn parse_int_or(s : String, fallback : Int) -> Int {
+  let s = s.trim()
+  if s.length() == 0 {
+    return fallback
+  }
+  let mut result = 0
+  let mut idx = 0
+  let mut neg = false
+  if s[0] == '-' {
+    neg = true
+    idx = 1
+  } else if s[0] == '+' {
+    idx = 1
+  }
+  if idx >= s.length() {
+    return fallback
+  }
+  let mut ok = true
+  while idx < s.length() {
+    let c = s[idx].to_int() - '0'.to_int()
+    if c >= 0 && c <= 9 {
+      result = result * 10 + c
+    } else {
+      ok = false
+      break
+    }
+    idx = idx + 1
+  }
+  if ok {
+    if neg {
+      -result
+    } else {
+      result
+    }
+  } else {
+    fallback
+  }
+}
+
+///|
+/// ClickHouse HTTP driver demo: comprehensive test of the current features.
 /// Run with `moon run cmd/main`.
 ///
-/// Single unified API: `execute_query(sql, params?)` — covers SELECT, DDL,
-/// and inline-VALUES INSERT, with optional named-parameter substitution.
+/// Single unified API: `execute_query(sql, params?)` covers SELECT / DDL /
+/// inline-VALUES INSERT; `insert()` streams bulk rows as the HTTP body;
+/// `execute_stream()` reads large result sets row by row.
 async fn main {
   let conn = @lib.connect(
     host="127.0.0.1",
@@ -92,6 +134,49 @@ async fn main {
       ),
     )
     println("[5] INSERT demo_drv ok (3 rows via positional `?`)")
+
+    // ---- 5b. INSERT via insert() — bulk rows streamed as TSV body ----
+    let bulk_rows : Array[Array[String]] = [
+      ["4", "dave", "2024-06-15 12:30:01"],
+      ["5", "erin", "2024-06-15 12:30:02"],
+      ["6", "frank", "2024-06-15 12:30:03"],
+    ]
+    conn.insert("demo_drv", ["id", "name", "ts"], bulk_rows)
+    println("[5b] insert() ok (3 rows via streamed TSV body)")
+
+    // ---- 5c. insert() with JSONEachRow (Ndjson) format ----
+    let nd_rows : Array[Array[String]] = [
+      ["7", "grace", "2024-06-15 12:30:04"],
+      ["8", "heidi", "2024-06-15 12:30:05"],
+    ]
+    conn.insert(
+      "demo_drv",
+      ["id", "name", "ts"],
+      nd_rows,
+      format=@lib.InsertFormat::Ndjson,
+    )
+    println("[5c] insert() ok (2 rows via JSONEachRow body)")
+
+    // ---- 5d. execute_stream — row-by-row reading ----
+    let cur = conn.execute_stream("SELECT id, name FROM demo_drv ORDER BY id")
+    defer cur.close()
+    let mut stream_count = 0
+    let mut stream_sum = 0
+    while true {
+      match cur.next() {
+        None => break
+        Some(row) => {
+          stream_count = stream_count + 1
+          stream_sum = stream_sum + parse_int_or(row.values[0], 0)
+        }
+      }
+    }
+    println(
+      "[5d] execute_stream() rows=" +
+      stream_count.to_string() +
+      " id-sum=" +
+      stream_sum.to_string(),
+    )
 
     // ---- 6. SELECT verify INSERT (with WHERE filter via param) ----
     let r2 = conn.execute_query(

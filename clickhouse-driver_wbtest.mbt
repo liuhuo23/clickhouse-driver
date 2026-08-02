@@ -239,13 +239,17 @@ fn make_conn_for_url_test() -> Connection {
     password: "barn",
     database: "default",
     client_name: "moonbit-cli",
+    timeout_ms: 0,
+    https: false,
+    skip_verify: false,
+    compress: false,
   }
 }
 
 ///|
 test "build_url: query only, no named params" {
   let conn = make_conn_for_url_test()
-  let url = build_url(conn, "SELECT 1", {})
+  let url = build_url(conn, "SELECT 1", Map([]))
   assert_eq(
     url, "/?database=default&default_format=TabSeparatedWithNamesAndTypes&query=SELECT%201",
   )
@@ -919,8 +923,12 @@ test "build_url: database name with special chars is encoded" {
     password: "p",
     database: "my db/with spaces",
     client_name: "c",
+    timeout_ms: 0,
+    https: false,
+    skip_verify: false,
+    compress: false,
   }
-  let url = build_url(conn, "SELECT 1", {})
+  let url = build_url(conn, "SELECT 1", Map([]))
   assert_true(url.contains("database=my%20db%2fwith%20spaces"))
 }
 
@@ -933,8 +941,12 @@ test "build_url: query with special chars is encoded" {
     password: "p",
     database: "d",
     client_name: "c",
+    timeout_ms: 0,
+    https: false,
+    skip_verify: false,
+    compress: false,
   }
-  let url = build_url(conn, "SELECT * FROM t WHERE x = 'a b'", {})
+  let url = build_url(conn, "SELECT * FROM t WHERE x = 'a b'", Map([]))
   assert_true(
     url.contains(
       "query=SELECT%20%2a%20FROM%20t%20WHERE%20x%20%3d%20%27a%20b%27",
@@ -951,6 +963,10 @@ test "build_url: param keys are url-encoded" {
     password: "p",
     database: "d",
     client_name: "c",
+    timeout_ms: 0,
+    https: false,
+    skip_verify: false,
+    compress: false,
   }
   let url = build_url(conn, "SELECT {k v}", Map::from_array([("k v", "x")]))
   assert_true(url.contains("param_k%20v=x"))
@@ -965,6 +981,10 @@ test "build_url: many params are all included" {
     password: "p",
     database: "d",
     client_name: "c",
+    timeout_ms: 0,
+    https: false,
+    skip_verify: false,
+    compress: false,
   }
   let url = build_url(
     conn,
@@ -987,8 +1007,12 @@ test "build_url: response_format is always TabSeparatedWithNamesAndTypes" {
     password: "p",
     database: "d",
     client_name: "c",
+    timeout_ms: 0,
+    https: false,
+    skip_verify: false,
+    compress: false,
   }
-  let url = build_url(conn, "SELECT 1", {})
+  let url = build_url(conn, "SELECT 1", Map([]))
   assert_true(url.contains("default_format=TabSeparatedWithNamesAndTypes"))
 }
 
@@ -1213,4 +1237,360 @@ test "DbError::ConnectionError variant carries its message" {
     ConnectionError(msg) => assert_eq(msg, "connection refused")
     ServerError(_) => abort("wrong variant")
   }
+}
+
+// ============ P1: LZ4 decompression fixtures ============
+
+///|
+/// Decode a lowercase hex string into bytes.
+fn hex_to_bytes(hex : String) -> Bytes {
+  let buf = Buffer::Buffer(size_hint=hex.length() / 2)
+  let bytes = @utf8.encode(hex)
+  let mut i = 0
+  while i + 1 < bytes.length() {
+    let hi = hex_digit_val(bytes[i])
+    let lo = hex_digit_val(bytes[i + 1])
+    buf.write_byte((hi * 16 + lo).to_byte())
+    i = i + 2
+  }
+  buf.to_bytes()
+}
+
+///|
+fn hex_digit_val(b : Byte) -> Int {
+  let c = b.to_int()
+  if c >= '0'.to_int() && c <= '9'.to_int() {
+    c - '0'.to_int()
+  } else if c >= 'a'.to_int() && c <= 'f'.to_int() {
+    c - 'a'.to_int() + 10
+  } else if c >= 'A'.to_int() && c <= 'F'.to_int() {
+    c - 'A'.to_int() + 10
+  } else {
+    0
+  }
+}
+
+///|
+/// Build one ClickHouse `compress=1` block: 16 dummy checksum bytes + 9-byte
+/// header (method | comp_size LE | raw_size LE) + payload.
+fn build_compressed_block(
+  payload : Bytes,
+  compression : Int,
+  raw_size : Int,
+) -> Bytes {
+  let buf = Buffer::Buffer(size_hint=16 + 9 + payload.length())
+  for _ in 0..<16 {
+    buf.write_byte(b'\x00')
+  }
+  buf.write_byte(compression.to_byte())
+  let comp_size = 9 + payload.length()
+  buf.write_byte(comp_size.to_byte())
+  buf.write_byte((comp_size >> 8).to_byte())
+  buf.write_byte((comp_size >> 16).to_byte())
+  buf.write_byte((comp_size >> 24).to_byte())
+  buf.write_byte(raw_size.to_byte())
+  buf.write_byte((raw_size >> 8).to_byte())
+  buf.write_byte((raw_size >> 16).to_byte())
+  buf.write_byte((raw_size >> 24).to_byte())
+  buf.write_bytes(payload[:])
+  buf.to_bytes()
+}
+
+///|
+test "lz4_decompress_block: literals + short match" {
+  let block = hex_to_bytes("cf68656c6c6f20776f726c64200c0004")
+  let out = lz4_decompress_block(block, 0, block.length(), 35)
+  assert_eq(
+    out,
+    hex_to_bytes(
+      "68656c6c6f20776f726c642068656c6c6f20776f726c642068656c6c6f20776f726c64",
+    ),
+  )
+}
+
+///|
+test "lz4_decompress_block: literal-only final sequence" {
+  let block = hex_to_bytes("f00331093209330a34093509360a37093809390a")
+  let out = lz4_decompress_block(block, 0, block.length(), 18)
+  assert_eq(out, hex_to_bytes("31093209330a34093509360a37093809390a"))
+}
+
+///|
+test "lz4_decompress_block: overlapping match copy" {
+  let block = hex_to_bytes("1061010010620100000900106109001f620a0001")
+  let out = lz4_decompress_block(block, 0, block.length(), 40)
+  assert_eq(
+    out,
+    hex_to_bytes(
+      "61616161616262626262616161616162626262626161616161626262626261616161616262626262",
+    ),
+  )
+}
+
+///|
+test "lz4_decompress_block: larger block with multiple matches" {
+  let block = hex_to_bytes(
+    "f01074686520717569636b2062726f776e20666f78206a756d7073206f766572201f00916c617a7920646f672e0e000f2d0016a030313233343536373839",
+  )
+  let out = lz4_decompress_block(block, 0, block.length(), 100)
+  assert_eq(
+    out,
+    hex_to_bytes(
+      "74686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e2074686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e2030313233343536373839",
+    ),
+  )
+}
+
+///|
+test "lz4_decompress_block: extended lengths (255-byte literals)" {
+  let block = hex_to_bytes(
+    "fff1000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff0001ed",
+  )
+  let out = lz4_decompress_block(block, 0, block.length(), 512)
+  let expected = Bytes::makei(512, i => i.to_byte())
+  assert_eq(out, expected)
+}
+
+///|
+test "decompress_clickhouse_body: single LZ4 block (checksum skipped)" {
+  let raw = hex_to_bytes(
+    "68656c6c6f20776f726c642068656c6c6f20776f726c642068656c6c6f20776f726c64",
+  )
+  let lz4 = hex_to_bytes("cf68656c6c6f20776f726c64200c0004")
+  let body = build_compressed_block(lz4, 0x82, raw.length())
+  assert_eq(decompress_clickhouse_body(body), raw)
+}
+
+///|
+test "decompress_clickhouse_body: uncompressed block (method 0x02)" {
+  let raw = hex_to_bytes("68656c6c6f")
+  let body = build_compressed_block(raw, 0x02, raw.length())
+  assert_eq(decompress_clickhouse_body(body), raw)
+}
+
+///|
+test "decompress_clickhouse_body: multiple blocks concatenated" {
+  let raw1 = hex_to_bytes("68656c6c6f")
+  let lz2 = hex_to_bytes("cf68656c6c6f20776f726c64200c0004")
+  let body = Buffer::Buffer(size_hint=64)
+  body.write_bytes(build_compressed_block(raw1, 0x02, raw1.length())[:])
+  body.write_bytes(build_compressed_block(lz2, 0x82, 35)[:])
+  let out = decompress_clickhouse_body(body.to_bytes())
+  let expected = Buffer::Buffer(size_hint=64)
+  expected.write_bytes(raw1[:])
+  expected.write_bytes(
+    hex_to_bytes(
+      "68656c6c6f20776f726c642068656c6c6f20776f726c642068656c6c6f20776f726c64",
+    )[:],
+  )
+  assert_eq(out, expected.to_bytes())
+}
+
+///|
+test "decompress_clickhouse_body: empty body is empty" {
+  assert_eq(decompress_clickhouse_body(b""), b"")
+}
+
+///|
+test "decompress_clickhouse_body: truncated header raises" {
+  try {
+    ignore(decompress_clickhouse_body(hex_to_bytes("0011")))
+    fail("expected ConnectionError")
+  } catch {
+    DbError::ConnectionError(_) => ()
+    _ => fail("expected ConnectionError")
+  }
+}
+
+///|
+test "decompress_clickhouse_body: unsupported method raises" {
+  let lz4 = hex_to_bytes("cf68656c6c6f20776f726c64200c0004")
+  let body = build_compressed_block(lz4, 0x90, 35) // ZSTD unsupported
+  try {
+    ignore(decompress_clickhouse_body(body))
+    fail("expected ConnectionError")
+  } catch {
+    DbError::ConnectionError(_) => ()
+    _ => fail("expected ConnectionError")
+  }
+}
+
+///|
+test "decompress_clickhouse_body: garbage bytes raise" {
+  try {
+    ignore(
+      decompress_clickhouse_body(
+        hex_to_bytes("deadbeefdeadbeefdeadbeefdeadbeef"),
+      ),
+    )
+    fail("expected ConnectionError")
+  } catch {
+    DbError::ConnectionError(_) => ()
+    _ => fail("expected ConnectionError")
+  }
+}
+
+// ============ P1: batch insert encoding ============
+
+///|
+test "tsv_escape: escapes tab, newline, CR and backslash" {
+  assert_eq(tsv_escape("a\tb"), "a\\tb")
+  assert_eq(tsv_escape("a\nb"), "a\\nb")
+  assert_eq(tsv_escape("a\rb"), "a\\rb")
+  assert_eq(tsv_escape("a\\b"), "a\\\\b")
+  assert_eq(tsv_escape("plain text"), "plain text")
+  assert_eq(tsv_escape(""), "")
+}
+
+///|
+test "json_escape: escapes quotes, backslash and control chars" {
+  assert_eq(json_escape("a\"b"), "a\\\"b")
+  assert_eq(json_escape("a\\b"), "a\\\\b")
+  assert_eq(json_escape("a\nb"), "a\\nb")
+  assert_eq(json_escape("a\tb"), "a\\tb")
+  assert_eq(json_escape("a\rb"), "a\\rb")
+  assert_eq(json_escape("x\u0001y"), "x\\u0001y")
+  assert_eq(json_escape("plain"), "plain")
+}
+
+///|
+test "build_insert_sql: TSV format" {
+  assert_eq(
+    build_insert_sql("t", ["a", "b"], Tsv),
+    "INSERT INTO t (a, b) FORMAT TSV",
+  )
+  assert_eq(build_insert_sql("tbl", [], Tsv), "INSERT INTO tbl () FORMAT TSV")
+}
+
+///|
+test "build_insert_sql: Ndjson format" {
+  assert_eq(
+    build_insert_sql("t", ["a", "b"], Ndjson),
+    "INSERT INTO t (a, b) FORMAT JSONEachRow",
+  )
+}
+
+///|
+test "encode_row: TSV joins fields with tabs and newline" {
+  let row = encode_row(["a", "b"], ["1", "hello world"], Tsv)
+  assert_eq(row, b"1\thello world\n")
+}
+
+///|
+test "encode_row: TSV escapes special chars in fields" {
+  let row = encode_row(["a", "b"], ["x\ty", "z\nw"], Tsv)
+  assert_eq(row, b"x\\ty\tz\\nw\n")
+}
+
+///|
+test "encode_row: Ndjson produces one JSON object line" {
+  let row = encode_row(["id", "name"], ["1", "alice"], Ndjson)
+  assert_eq(row, b"{\"id\":\"1\",\"name\":\"alice\"}\n")
+}
+
+///|
+test "encode_row: Ndjson escapes string content" {
+  let row = encode_row(["msg"], ["say \"hi\"\n"], Ndjson)
+  assert_eq(row, b"{\"msg\":\"say \\\"hi\\\"\\n\"}\n")
+}
+
+///|
+test "encode_row: Ndjson missing fields become empty strings" {
+  let row = encode_row(["a", "b"], ["1"], Ndjson)
+  assert_eq(row, b"{\"a\":\"1\",\"b\":\"\"}\n")
+}
+
+// ============ P1: config evolution ============
+
+///|
+test "connect: new options default to safe values" {
+  let conn = connect(
+    host="h",
+    port=8123,
+    user="u",
+    password="p",
+    database="d",
+    client_name="c",
+  )
+  assert_eq(conn.timeout_ms, 0)
+  assert_eq(conn.https, false)
+  assert_eq(conn.skip_verify, false)
+  assert_eq(conn.compress, false)
+}
+
+///|
+test "connect: explicit options are stored" {
+  let conn = connect(
+    host="h",
+    port=8443,
+    user="u",
+    password="p",
+    database="d",
+    client_name="c",
+    timeout_ms=5000,
+    https=true,
+    skip_verify=true,
+    compress=true,
+  )
+  assert_eq(conn.timeout_ms, 5000)
+  assert_eq(conn.https, true)
+  assert_eq(conn.skip_verify, true)
+  assert_eq(conn.compress, true)
+}
+
+///|
+test "Connection::uri: http by default, https when enabled" {
+  let plain = connect(
+    host="h",
+    port=8123,
+    user="u",
+    password="p",
+    database="d",
+    client_name="c",
+  )
+  assert_eq(plain.uri(), "http://h:8123/")
+  let tls = connect(
+    host="h",
+    port=8443,
+    user="u",
+    password="p",
+    database="d",
+    client_name="c",
+    https=true,
+  )
+  assert_eq(tls.uri(), "https://h:8443/")
+}
+
+///|
+test "build_url: compress=1 appended when enabled" {
+  let conn = connect(
+    host="h",
+    port=8123,
+    user="u",
+    password="p",
+    database="d",
+    client_name="c",
+    compress=true,
+  )
+  let url = build_url(conn, "SELECT 1", Map([]))
+  assert_true(url.contains("compress=1"))
+  // default (no compress) does not include it
+  let plain = connect(
+    host="h",
+    port=8123,
+    user="u",
+    password="p",
+    database="d",
+    client_name="c",
+  )
+  let url2 = build_url(plain, "SELECT 1", Map([]))
+  assert_true(!url2.contains("compress"))
+}
+
+///|
+test "strip_cr: removes single trailing CR" {
+  assert_eq(strip_cr("abc\r"), "abc")
+  assert_eq(strip_cr("abc"), "abc")
+  assert_eq(strip_cr(""), "")
+  assert_eq(strip_cr("\r"), "")
 }

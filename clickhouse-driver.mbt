@@ -1,15 +1,18 @@
 ///|
 /// ClickHouse HTTP driver for MoonBit.
 ///
-/// Uses the native ClickHouse HTTP interface (default port 8123, also works on 8000)
-/// over plain HTTP/1.1. Responses are parsed as TabSeparatedWithNamesAndTypes, so
-/// column names and types come back automatically — no binary protocol overhead.
+/// Uses the native ClickHouse HTTP interface (default port 8123, also works on
+/// 8000) over HTTP/1.1 — plain `http://` or `https://` (TLS). Responses are
+/// parsed as TabSeparatedWithNamesAndTypes, so column names and types come
+/// back automatically — no binary protocol overhead.
 ///
-/// Public API mirrors the previous native driver:
+/// Public API:
 ///   connect → Connection  (lightweight config struct; no persistent socket)
 ///   conn.ping()           — SELECT 1 round-trip
 ///   conn.execute_query()  — SELECT/DDL, returns ResultSet
-///   conn.insert()         — streaming TSV INSERT
+///   conn.execute()        — positional `?` binding (inline VALUES)
+///   conn.execute_stream() — row-by-row streaming cursor
+///   conn.insert()         — real batch insert (streamed TSV/JSONEachRow body)
 ///   conn.cancel()         — no-op (HTTP doesn't expose mid-query cancel)
 ///   conn.close()          — no-op
 
@@ -50,6 +53,79 @@ pub fn ResultSet::to_map(self : ResultSet) -> Array[Map[String, String]] {
   result
 }
 
+///|
+/// Wire format used by `Connection::insert` for the request body.
+pub(all) enum InsertFormat {
+  /// `FORMAT TSV` — tab-separated values (recommended, compact).
+  Tsv
+  /// `FORMAT JSONEachRow` — one JSON object per line.
+  Ndjson
+}
+
+///|
+/// Streaming cursor returned by `Connection::execute_stream`.
+///
+/// The HTTP response body is consumed lazily, one row at a time, so queries
+/// with large result sets do not need to be buffered in memory. Always call
+/// `close()` when done to release the underlying connection.
+///
+/// `columns()` is available immediately after the cursor is created; rows are
+/// read with repeated `next()` calls (returns `None` at end of stream).
+pub struct ResultSetCursor {
+  priv client : @http.Client
+  priv cols : Array[Column]
+  priv timeout_ms : Int
+}
+
+///|
+/// The columns (name + type) of the streamed query result.
+pub fn ResultSetCursor::columns(self : ResultSetCursor) -> Array[Column] {
+  self.cols
+}
+
+///|
+/// Read the next row from the stream, or `None` at end of stream.
+///
+/// If the connection was configured with a positive `timeout_ms`, each `next()`
+/// call is bounded by that timeout; a timeout raises `ConnectionError`.
+pub async fn ResultSetCursor::next(self : ResultSetCursor) -> Row? {
+  let mut result : Row? = None
+  while true {
+    let line : String? = if self.timeout_ms > 0 {
+      @async.with_timeout(self.timeout_ms, () => self.client.read_until("\n")) catch {
+        @async.TimeoutError =>
+          raise ConnectionError(
+            "stream read timed out after \{self.timeout_ms}ms",
+          )
+        err => raise err
+      }
+    } else {
+      self.client.read_until("\n")
+    }
+    match line {
+      None => break
+      Some(line) => {
+        // Skip empty trailing lines (same rule as the buffered parser).
+        let line = strip_cr(line)
+        if line.length() == 0 {
+          continue
+        }
+        let values = split_tsv_line(line)
+        result = Some({ values, })
+        break
+      }
+    }
+  }
+  result
+}
+
+///|
+/// Close the streaming cursor and release the underlying connection.
+/// Idempotent — safe to call multiple times.
+pub fn ResultSetCursor::close(self : ResultSetCursor) -> Unit {
+  self.client.close()
+}
+
 // ============ Errors ============
 
 ///|
@@ -73,6 +149,15 @@ pub struct Connection {
   password : String
   database : String
   client_name : String
+  /// Per-request timeout in milliseconds; `0` (default) means no timeout.
+  timeout_ms : Int
+  /// Use `https://` instead of `http://` (TLS).
+  https : Bool
+  /// Skip TLS certificate verification (only meaningful when `https=true`).
+  skip_verify : Bool
+  /// Ask the server to compress responses with ClickHouse-native LZ4
+  /// (`compress=1`).
+  compress : Bool
 }
 
 // ============ Public API ============
@@ -80,6 +165,12 @@ pub struct Connection {
 ///|
 /// Build a Connection config from explicit connection params.
 /// Does NOT open a TCP connection — calls are stateless.
+///
+/// Optional params (all backward compatible):
+///   timeout_ms — request timeout in ms; `0` = no timeout (default)
+///   https      — use TLS (`https://`); default false
+///   skip_verify— skip TLS certificate verification; default false
+///   compress   — request ClickHouse LZ4 response compression; default false
 pub fn connect(
   host~ : String,
   port~ : Int,
@@ -87,8 +178,23 @@ pub fn connect(
   password~ : String,
   database~ : String,
   client_name~ : String,
+  timeout_ms? : Int = 0,
+  https? : Bool = false,
+  skip_verify? : Bool = false,
+  compress? : Bool = false,
 ) -> Connection {
-  { host, port, user, password, database, client_name }
+  {
+    host,
+    port,
+    user,
+    password,
+    database,
+    client_name,
+    timeout_ms,
+    https,
+    skip_verify,
+    compress,
+  }
 }
 
 ///|
@@ -106,7 +212,7 @@ pub fn Connection::cancel(self : Connection) -> Unit {
 ///|
 /// Round-trip health check: sends `SELECT 1` and expects 200 OK.
 pub async fn Connection::ping(self : Connection) -> Unit {
-  let (status, body) = self.http_request("SELECT 1", {})
+  let (status, body) = self.http_request("SELECT 1", Map([]))
   if status != 200 {
     raise ServerError(
       code=status,
@@ -137,7 +243,7 @@ pub async fn Connection::ping(self : Connection) -> Unit {
 pub async fn Connection::execute_query(
   self : Connection,
   sql : String,
-  params? : Map[String, String] = {},
+  params? : Map[String, String] = Map([]),
 ) -> ResultSet {
   self.do_request(apply_default_types(sql), params)
 }
@@ -175,6 +281,69 @@ pub async fn Connection::execute(
 }
 
 ///|
+/// Execute a query and return a streaming cursor over the result rows.
+///
+/// Unlike `execute_query` (which buffers the whole result in memory), the
+/// response body is read lazily row-by-row via `next()`. This is the right
+/// tool for large SELECTs:
+///
+///   let cur = conn.execute_stream("SELECT * FROM events")
+///   defer cur.close()
+///   while let Some(row) = cur.next() {
+///     println(row.values)
+///   }
+///
+/// The cursor must be closed with `close()` (also via `defer`) to release the
+/// underlying HTTP connection. Named `params` work exactly like
+/// `execute_query`. Compressed responses (`compress=true`) are not supported
+/// for streaming yet and raise `ConnectionError`.
+pub async fn Connection::execute_stream(
+  self : Connection,
+  sql : String,
+  params? : Map[String, String] = Map([]),
+) -> ResultSetCursor {
+  guard !self.compress else {
+    raise ConnectionError(
+      "execute_stream does not support compress=true; use execute_query",
+    )
+  }
+  self.run_with_timeout(() => {
+    self.execute_stream_impl(apply_default_types(sql), params)
+  })
+}
+
+///|
+/// Stream a batch insert to the server over the HTTP body (POST), instead of
+/// inlining rows as VALUES literals in the SQL text.
+///
+/// `table` and `columns` are interpolated verbatim into the SQL (identifiers —
+/// quote them yourself if needed). Each element of `rows` is one row whose
+/// fields correspond positionally to `columns`. All values are sent as text;
+/// ClickHouse coerces them to the target column types.
+///
+/// `format` selects the wire format (`Tsv` by default, `Ndjson` for
+/// JSONEachRow). The body is streamed to the server in chunks, so large
+/// inserts do not blow up the SQL text size. Raises `ServerError` on a
+/// non-2xx response and `ConnectionError` on transport failures / timeouts.
+///
+/// Example:
+///   conn.insert("users", ["id", "name"], [["1", "alice"], ["2", "bob"]])
+pub async fn Connection::insert(
+  self : Connection,
+  table : String,
+  columns : Array[String],
+  rows : Array[Array[String]],
+  format? : InsertFormat = Tsv,
+) -> Unit {
+  let sql = build_insert_sql(table, columns, format)
+  self.run_with_timeout(() => {
+    self.insert_impl(build_url(self, sql, Map([])), columns, rows, format)
+  })
+}
+
+// ============ Internal request machinery ============
+
+///|
 async fn Connection::do_request(
   self : Connection,
   sql : String,
@@ -189,6 +358,169 @@ async fn Connection::do_request(
     )
   }
   parse_tsv_response(body)
+}
+
+///|
+/// Run an async operation, enforcing `timeout_ms` when it is positive.
+/// On timeout raises `ConnectionError` (the underlying task is cancelled).
+async fn[X] Connection::run_with_timeout(
+  self : Connection,
+  f : async () -> X,
+) -> X {
+  if self.timeout_ms <= 0 {
+    return f()
+  }
+  @async.with_timeout(self.timeout_ms, f) catch {
+    @async.TimeoutError =>
+      raise ConnectionError("request timed out after \{self.timeout_ms}ms")
+    err => raise err
+  }
+}
+
+///|
+/// Send an HTTP request to ClickHouse and return (status_code, body_text).
+/// Applies the connection-level timeout when configured.
+async fn Connection::http_request(
+  self : Connection,
+  query : String,
+  params : Map[String, String],
+) -> (Int, String) {
+  self.run_with_timeout(() => self.http_request_impl(query, params))
+}
+
+///|
+/// Actual HTTP round-trip (no timeout wrapping).
+async fn Connection::http_request_impl(
+  self : Connection,
+  query : String,
+  params : Map[String, String],
+) -> (Int, String) {
+  let path = build_url(self, query, params)
+  let client = self.open_client()
+  // Always use POST with empty body — works for SELECT, DDL, INSERT, etc.
+  // (ClickHouse rejects non-SELECT queries via GET as "readonly mode".)
+  let body_bytes : Bytes = b""
+  let body_data : &@io.Data = body_bytes
+  let response = client.post(path, body_data)
+  let status = response.code
+  let raw = read_response_bytes(client)
+  client.close()
+  let body = if self.compress {
+    // Decompress the ClickHouse LZ4 stream; non-200 error bodies may be plain
+    // text, so fall back to the raw bytes when the stream is malformed.
+    decompress_clickhouse_body(raw) catch {
+      _ => raw
+    }
+  } else {
+    raw
+  }
+  (status, @utf8.decode_lossy(body))
+}
+
+///|
+/// Open a fresh HTTP client for one request, honoring TLS settings.
+async fn Connection::open_client(self : Connection) -> @http.Client {
+  let headers = self.common_headers()
+  let trust = if self.skip_verify {
+    @tls.NoVerification
+  } else {
+    @tls.SystemRoot
+  }
+  @http.Client::Client(self.uri(), headers~, trust~)
+}
+
+///|
+/// Headers shared by all requests.
+fn Connection::common_headers(self : Connection) -> Map[String, String] {
+  let headers : Map[String, String] = Map::Map([])
+  headers.set("Authorization", basic_auth_header(self.user, self.password))
+  headers.set("Connection", "close")
+  headers.set("X-ClickHouse-Client-Name", self.client_name)
+  headers
+}
+
+///|
+/// Base URI for the connection, e.g. `http://host:8123/` or `https://host:8443/`.
+fn Connection::uri(self : Connection) -> String {
+  let scheme = if self.https { "https" } else { "http" }
+  scheme + "://" + self.host + ":" + self.port.to_string() + "/"
+}
+
+///|
+/// Streaming insert: send the encoded rows as the POST body.
+async fn Connection::insert_impl(
+  self : Connection,
+  path : String,
+  columns : Array[String],
+  rows : Array[Array[String]],
+  format : InsertFormat,
+) -> Unit {
+  let client = self.open_client()
+  // Start the POST; only the request line + headers are sent so far.
+  client.request(@http.RequestMethod::Post, path)
+  for row in rows {
+    let row_bytes = encode_row(columns, row, format)
+    let row_data : &@io.Data = row_bytes
+    client.write(row_data)
+  }
+  client.flush()
+  let response = client.end_request()
+  let status = response.code
+  if status != 200 {
+    let body = read_response_body(client)
+    client.close()
+    raise ServerError(
+      code=status,
+      name="HTTPError",
+      message=extract_error(body),
+    )
+  }
+  client.close()
+}
+
+///|
+/// Streaming cursor setup: send the query and read the two header lines.
+async fn Connection::execute_stream_impl(
+  self : Connection,
+  sql : String,
+  params : Map[String, String],
+) -> ResultSetCursor {
+  let path = build_url(self, sql, params)
+  let client = self.open_client()
+  let body_bytes : Bytes = b""
+  let body_data : &@io.Data = body_bytes
+  let response = client.post(path, body_data)
+  if response.code != 200 {
+    let body = read_response_body(client)
+    client.close()
+    raise ServerError(
+      code=response.code,
+      name="HTTPError",
+      message=extract_error(body),
+    )
+  }
+  let names_line = match client.read_until("\n") {
+    None => {
+      client.close()
+      raise ConnectionError("empty response from server")
+    }
+    Some(line) => strip_cr(line)
+  }
+  let types_line = match client.read_until("\n") {
+    None => {
+      client.close()
+      raise ConnectionError("missing type header from server")
+    }
+    Some(line) => strip_cr(line)
+  }
+  let names = split_tsv_line(names_line)
+  let types = split_tsv_line(types_line)
+  let cols : Array[Column] = []
+  for i in 0..<names.length() {
+    let typ = if i < types.length() { types[i] } else { "" }
+    cols.push({ name: names[i], type_: typ })
+  }
+  { client, cols, timeout_ms: self.timeout_ms }
 }
 
 ///|
@@ -309,40 +641,121 @@ fn apply_default_types(sql : String) -> String {
   @utf8.decode_lossy(buf.to_bytes())
 }
 
-// ============ HTTP layer (private) ============
+// ============ Batch insert encoding ============
 
 ///|
-/// Send an HTTP request to ClickHouse.
-/// Returns (status_code, response_body). On network/protocol failure raises
-/// ConnectionError.
-async fn Connection::http_request(
-  self : Connection,
-  query : String,
-  params : Map[String, String],
-) -> (Int, String) {
-  // Build query string (path + named params)
-  let path = build_url(self, query, params)
-  // Common headers
-  let headers : Map[String, String] = Map::Map([])
-  headers.set("Host", self.host + ":" + self.port.to_string())
-  headers.set("Authorization", basic_auth_header(self.user, self.password))
-  headers.set("Connection", "close")
-  headers.set("X-ClickHouse-Client-Name", self.client_name)
-
-  // Open a fresh HTTP client per request. URI form: http://host:port/
-  let uri = "http://" + self.host + ":" + self.port.to_string() + "/"
-  let client = @http.Client::Client(uri, headers~)
-  // Always use POST with empty body — works for SELECT, DDL, INSERT, etc.
-  // (ClickHouse rejects non-SELECT queries via GET as "readonly mode".)
-  let body_bytes : Bytes = b""
-  let body_data : &@io.Data = body_bytes
-  let response = client.post(path, body_data)
-
-  let body_str = read_response_body(client)
-  let status = response.code
-  client.close()
-  (status, body_str)
+/// SQL text for a bulk insert: `INSERT INTO <table> (<cols>) FORMAT <fmt>`.
+/// Identifiers are interpolated verbatim — quote them yourself if needed.
+fn build_insert_sql(
+  table : String,
+  columns : Array[String],
+  format : InsertFormat,
+) -> String {
+  let buf = Buffer::Buffer(size_hint=64)
+  buf.write_bytes(@utf8.encode("INSERT INTO " + table + " ("))
+  for i in 0..<columns.length() {
+    if i > 0 {
+      buf.write_bytes(@utf8.encode(", "))
+    }
+    buf.write_bytes(@utf8.encode(columns[i]))
+  }
+  buf.write_bytes(@utf8.encode(") FORMAT "))
+  buf.write_bytes(@utf8.encode(format_name(format)))
+  @utf8.decode_lossy(buf.to_bytes())
 }
+
+///|
+/// ClickHouse FORMAT keyword for an InsertFormat.
+fn format_name(format : InsertFormat) -> String {
+  match format {
+    Tsv => "TSV"
+    Ndjson => "JSONEachRow"
+  }
+}
+
+///|
+/// Encode a single row for the given wire format.
+fn encode_row(
+  columns : Array[String],
+  row : Array[String],
+  format : InsertFormat,
+) -> Bytes {
+  let buf = Buffer::Buffer(size_hint=32)
+  match format {
+    Tsv => {
+      let mut first = true
+      for v in row {
+        if !first {
+          buf.write_byte(b'\t')
+        }
+        buf.write_bytes(@utf8.encode(tsv_escape(v)))
+        first = false
+      }
+      buf.write_byte(b'\n')
+    }
+    Ndjson => {
+      buf.write_byte(b'{')
+      for i in 0..<columns.length() {
+        if i > 0 {
+          buf.write_byte(b',')
+        }
+        buf.write_byte(b'"')
+        buf.write_bytes(@utf8.encode(json_escape(columns[i])))
+        buf.write_bytes(@utf8.encode("\":"))
+        let value = if i < row.length() { row[i] } else { "" }
+        buf.write_byte(b'"')
+        buf.write_bytes(@utf8.encode(json_escape(value)))
+        buf.write_byte(b'"')
+      }
+      buf.write_byte(b'}')
+      buf.write_byte(b'\n')
+    }
+  }
+  buf.to_bytes()
+}
+
+///|
+/// Escape a TSV field: `\`, tab, LF and CR become backslash sequences.
+fn tsv_escape(s : String) -> String {
+  let bytes = @utf8.encode(s)
+  let buf = Buffer::Buffer(size_hint=bytes.length() + 8)
+  for b in bytes {
+    match b {
+      b'\\' => buf.write_bytes(@utf8.encode("\\\\"))
+      b'\t' => buf.write_bytes(@utf8.encode("\\t"))
+      b'\n' => buf.write_bytes(@utf8.encode("\\n"))
+      b'\r' => buf.write_bytes(@utf8.encode("\\r"))
+      _ => buf.write_byte(b)
+    }
+  }
+  @utf8.decode_lossy(buf.to_bytes())
+}
+
+///|
+/// Escape a string as the inside of a JSON string literal.
+fn json_escape(s : String) -> String {
+  let bytes = @utf8.encode(s)
+  let buf = Buffer::Buffer(size_hint=bytes.length() + 8)
+  for b in bytes {
+    match b {
+      b'"' => buf.write_bytes(@utf8.encode("\\\""))
+      b'\\' => buf.write_bytes(@utf8.encode("\\\\"))
+      b'\n' => buf.write_bytes(@utf8.encode("\\n"))
+      b'\r' => buf.write_bytes(@utf8.encode("\\r"))
+      b'\t' => buf.write_bytes(@utf8.encode("\\t"))
+      b'\x00'..<b'\x20' => {
+        let code = b.to_int()
+        buf.write_bytes(@utf8.encode("\\u00"))
+        buf.write_byte(hex_nibble_byte(code / 16))
+        buf.write_byte(hex_nibble_byte(code % 16))
+      }
+      _ => buf.write_byte(b)
+    }
+  }
+  @utf8.decode_lossy(buf.to_bytes())
+}
+
+// ============ HTTP layer (private) ============
 
 ///|
 /// Build the full request URL with query params.
@@ -364,6 +777,9 @@ fn build_url(
   buf.write_bytes(@utf8.encode("/?database="))
   buf.write_bytes(@utf8.encode(url_encode(conn.database)))
   buf.write_bytes(@utf8.encode("&default_format=TabSeparatedWithNamesAndTypes"))
+  if conn.compress {
+    buf.write_bytes(@utf8.encode("&compress=1"))
+  }
   buf.write_bytes(@utf8.encode("&query="))
   buf.write_bytes(@utf8.encode(url_encode(query)))
   // Named parameters: param_<key>=<value> pairs
@@ -379,8 +795,8 @@ fn build_url(
 }
 
 ///|
-/// Read entire response body from an HTTP client until EOF.
-async fn read_response_body(client : @http.Client) -> String {
+/// Read the entire raw response body from an HTTP client until EOF.
+async fn read_response_bytes(client : @http.Client) -> Bytes {
   let acc = Buffer::Buffer(size_hint=4096)
   let buf = FixedArray::make(4096, b'\x00')
   let mut total = 0
@@ -399,7 +815,161 @@ async fn read_response_body(client : @http.Client) -> String {
     }
   }
   ignore(total)
-  @utf8.decode_lossy(acc.to_bytes())
+  acc.to_bytes()
+}
+
+///|
+/// Read entire response body from an HTTP client until EOF (text form).
+async fn read_response_body(client : @http.Client) -> String {
+  @utf8.decode_lossy(read_response_bytes(client))
+}
+
+// ============ ClickHouse LZ4 response decompression ============
+
+///|
+/// Decompress a ClickHouse `compress=1` HTTP response body.
+///
+/// The body is a concatenation of blocks, each:
+///   [16-byte CityHash128 checksum][9-byte header][compressed payload]
+/// The checksum is skipped (not verified). The 9-byte header is:
+///   method (1 byte) | compressed_size incl. header (4 LE) | raw_size (4 LE)
+/// Methods: 0x02 = none, 0x82 = LZ4, 0x90 = ZSTD (unsupported).
+fn decompress_clickhouse_body(body : Bytes) -> Bytes raise {
+  let out = Buffer::Buffer(size_hint=body.length() * 2)
+  let mut i = 0
+  while i < body.length() {
+    if body.length() - i < 16 + 9 {
+      raise ConnectionError("truncated ClickHouse compressed block header")
+    }
+    let header = i + 16
+    let compression = body[header].to_int()
+    let comp_size = read_le_u32(body, header + 1)
+    let raw_size = read_le_u32(body, header + 5)
+    if comp_size < 9 || header + comp_size > body.length() {
+      raise ConnectionError("invalid ClickHouse compressed block size")
+    }
+    let payload_start = header + 9
+    let payload_len = comp_size - 9
+    match compression {
+      0x02 => {
+        if raw_size > payload_len {
+          raise ConnectionError("invalid uncompressed block size")
+        }
+        for k in 0..<raw_size {
+          out.write_byte(body[payload_start + k])
+        }
+      }
+      0x82 => {
+        let block = lz4_decompress_block(
+          body, payload_start, payload_len, raw_size,
+        )
+        out.write_bytes(block)
+      }
+      _ =>
+        raise ConnectionError(
+          "unsupported ClickHouse compression method: \{compression}",
+        )
+    }
+    i = payload_start + payload_len
+  }
+  out.to_bytes()
+}
+
+///|
+/// Read a little-endian UInt32 from a byte buffer.
+fn read_le_u32(bytes : Bytes, start : Int) -> Int {
+  bytes[start].to_int() |
+  (bytes[start + 1].to_int() << 8) |
+  (bytes[start + 2].to_int() << 16) |
+  (bytes[start + 3].to_int() << 24)
+}
+
+///|
+/// Decompress one LZ4 *block* (no frame header) into exactly `raw_size` bytes.
+/// `block` is the payload slice `[start, start + len)` of `bytes`.
+///
+/// LZ4 block sequence: token (high nibble = literal len, low nibble = match
+/// len - 4), optional 0xFF extended lengths, literals, 2-byte LE match offset,
+/// then the match (copied with overlap allowed).
+fn lz4_decompress_block(
+  bytes : Bytes,
+  start : Int,
+  len : Int,
+  raw_size : Int,
+) -> Bytes raise {
+  let out = FixedArray::make(raw_size, b'\x00')
+  let mut out_len = 0
+  let mut i = start
+  let end = start + len
+  while i < end {
+    let token = bytes[i].to_int()
+    i = i + 1
+    // Literal length (0xFF extension while byte == 255).
+    let mut lit_len = token >> 4
+    if lit_len == 15 {
+      while true {
+        guard i < end else {
+          raise ConnectionError("truncated LZ4 literal length")
+        }
+        let b = bytes[i].to_int()
+        i = i + 1
+        lit_len = lit_len + b
+        if b != 255 {
+          break
+        }
+      }
+    }
+    guard i + lit_len <= end else {
+      raise ConnectionError("truncated LZ4 literals")
+    }
+    guard out_len + lit_len <= raw_size else {
+      raise ConnectionError("LZ4 output overflow")
+    }
+    for k in 0..<lit_len {
+      out[out_len + k] = bytes[i + k]
+    }
+    out_len = out_len + lit_len
+    i = i + lit_len
+    // Last sequence may be literals only.
+    if i >= end {
+      break
+    }
+    // Match offset (2 bytes LE).
+    guard i + 2 <= end else {
+      raise ConnectionError("truncated LZ4 match offset")
+    }
+    let offset = bytes[i].to_int() | (bytes[i + 1].to_int() << 8)
+    i = i + 2
+    guard offset > 0 else { raise ConnectionError("invalid LZ4 match offset") }
+    // Match length (0xFF extension while byte == 255).
+    let mut match_len = (token & 0x0F) + 4
+    if (token & 0x0F) == 15 {
+      while true {
+        guard i < end else {
+          raise ConnectionError("truncated LZ4 match length")
+        }
+        let b = bytes[i].to_int()
+        i = i + 1
+        match_len = match_len + b
+        if b != 255 {
+          break
+        }
+      }
+    }
+    guard offset <= out_len else {
+      raise ConnectionError("LZ4 match before start")
+    }
+    guard out_len + match_len <= raw_size else {
+      raise ConnectionError("LZ4 output overflow")
+    }
+    let match_start = out_len - offset
+    for k in 0..<match_len {
+      out[out_len] = out[match_start + k]
+      out_len = out_len + 1
+    }
+  }
+  guard out_len == raw_size else { raise ConnectionError("LZ4 size mismatch") }
+  out.unsafe_reinterpret_as_bytes()
 }
 
 ///|
@@ -511,6 +1081,16 @@ fn split_lines(s : String) -> Array[String] {
   }
   ignore(s)
   result
+}
+
+///|
+/// Strip a single trailing carriage return (for CRLF-terminated lines).
+fn strip_cr(s : String) -> String {
+  if s.length() > 0 && s[s.length() - 1] == '\r' {
+    substr(s, 0, s.length() - 1)
+  } else {
+    s
+  }
 }
 
 ///|

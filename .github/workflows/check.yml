@@ -51,15 +51,11 @@ jobs:
           moon info && git diff --exit-code
 
   # Integration tests against a real ClickHouse server.
-  # GitHub Actions `services:` are Linux-only, so we launch the
-  # server via `docker run` inside a step — works on both Linux
-  # and macOS runners (GitHub-hosted macos-latest ships Docker).
+  # Docker is only preinstalled on Linux runners; GitHub-hosted
+  # macOS images do not ship Docker (licensing). Native compile /
+  # unit coverage for macOS stays in the `build` job above.
   integration:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
