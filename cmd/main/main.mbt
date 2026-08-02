@@ -40,6 +40,34 @@ fn parse_int_or(s : String, fallback : Int) -> Int {
 }
 
 ///|
+/// ClickHouse >= 25 requires `{name: Identifier}` for identifiers (table
+/// names); older versions accept `{name}` / `{name: String}` instead.
+async fn supports_identifier_param(conn : @lib.Connection) -> Bool {
+  try {
+    let r = conn.execute_query("SELECT version() AS v")
+    if r.rows.length() == 0 {
+      return false
+    }
+    let version = r.rows[0].values[0]
+    let mut major = 0
+    for ch in version.iter() {
+      if ch == '.' {
+        break
+      }
+      let c = ch.to_int() - '0'.to_int()
+      if c >= 0 && c <= 9 {
+        major = major * 10 + c
+      } else {
+        break
+      }
+    }
+    major >= 25
+  } catch {
+    _ => false
+  }
+}
+
+///|
 /// ClickHouse HTTP driver demo: comprehensive test of the current features.
 /// Run with `moon run cmd/main`.
 ///
@@ -47,12 +75,24 @@ fn parse_int_or(s : String, fallback : Int) -> Int {
 /// inline-VALUES INSERT; `insert()` streams bulk rows as the HTTP body;
 /// `execute_stream()` reads large result sets row by row.
 async fn main {
+  // Connection settings come from env vars (CLICKHOUSE_HOST / CLICKHOUSE_PORT /
+  // CLICKHOUSE_USER / CLICKHOUSE_PASSWORD / CLICKHOUSE_DATABASE) with sensible
+  // defaults, so the same demo works against any ClickHouse:
+  //   CLICKHOUSE_PORT=38123 moon run cmd/main
+  let host = @env.get_env_var("CLICKHOUSE_HOST").unwrap_or("127.0.0.1")
+  let port = match @env.get_env_var("CLICKHOUSE_PORT") {
+    Some(p) => parse_int_or(p, 8123)
+    None => 8123
+  }
+  let user = @env.get_env_var("CLICKHOUSE_USER").unwrap_or("default")
+  let password = @env.get_env_var("CLICKHOUSE_PASSWORD").unwrap_or("barn")
+  let database = @env.get_env_var("CLICKHOUSE_DATABASE").unwrap_or("default")
   let conn = @lib.connect(
-    host="127.0.0.1",
-    port=8123,
-    user="default",
-    password="barn",
-    database="default",
+    host~,
+    port~,
+    user~,
+    password~,
+    database~,
     client_name="moonbit-cli",
   )
   defer conn.close()
@@ -70,6 +110,10 @@ async fn main {
   )
 
   try {
+    // ---- 0b. Reset demo tables (idempotent reruns) ----
+    ignore(conn.execute_query("DROP TABLE IF EXISTS demo_drv"))
+    ignore(conn.execute_query("DROP TABLE IF EXISTS demo_drv_ident"))
+
     // ---- 1. Health check ----
     conn.ping()
     println("[1] ping ok")
@@ -157,9 +201,12 @@ async fn main {
     )
     println("[5c] insert() ok (2 rows via JSONEachRow body)")
 
-    // ---- 5d. execute_stream — row-by-row reading ----
+    // ---- 5d. execute_stream — row-by-row reading (no full buffering) ----
     let cur = conn.execute_stream("SELECT id, name FROM demo_drv ORDER BY id")
     defer cur.close()
+    // Schema is available immediately, before any row is read.
+    let schema = cur.columns().map(fn(c) { c.name + ":" + c.type_ }).join(", ")
+    println("[5d] execute_stream() schema: " + schema)
     let mut stream_count = 0
     let mut stream_sum = 0
     while true {
@@ -211,10 +258,17 @@ async fn main {
     }
 
     // ---- 8. ServerError: nonexistent table ----
+    // The `{tn}` placeholder binds a table name; ClickHouse >= 25 needs the
+    // explicit `Identifier` type for identifier positions.
+    let tn_placeholder = if supports_identifier_param(conn) {
+      "{tn: Identifier}"
+    } else {
+      "{tn}"
+    }
     try {
       ignore(
         conn.execute_query(
-          "SELECT * FROM {tn}",
+          "SELECT * FROM " + tn_placeholder,
           params=Map::from_array([("tn", "system.no_such_table_xyz")]),
         ),
       )
@@ -247,6 +301,169 @@ async fn main {
     conn.ping()
     println("[10] ping after errors ok")
 
+    // ---- 11. compress=true — LZ4-compressed responses ----
+    // ClickHouse compresses the response body (`compress=1`); the driver
+    // decodes the LZ4 blocks transparently. Use it for large result sets.
+    let conn_c = @lib.connect(
+      host~,
+      port~,
+      user~,
+      password~,
+      database~,
+      client_name="moonbit-cli-compress",
+      compress=true,
+    )
+    defer conn_c.close()
+    let r_c = conn_c.execute_query(
+      "SELECT number, randomPrintableASCII(64) FROM numbers(5000)",
+    )
+    println(
+      "[11] compress=true: rows=" +
+      r_c.rows.length().to_string() +
+      " (LZ4 decompressed)",
+    )
+
+    // ---- 12. timeout_ms — bound every request ----
+    // A positive timeout cancels slow requests and raises ConnectionError.
+    let conn_t = @lib.connect(
+      host~,
+      port~,
+      user~,
+      password~,
+      database~,
+      client_name="moonbit-cli-timeout",
+      timeout_ms=2000,
+    )
+    defer conn_t.close()
+    try {
+      ignore(conn_t.execute_query("SELECT sleep(3)"))
+      println("[12] UNEXPECTED: sleep(3) finished within 2000ms")
+    } catch {
+      @lib.DbError::ConnectionError(msg) =>
+        println("[12] timeout demo (expected): " + msg)
+      @lib.DbError::ServerError(code=_, name=_, message~) =>
+        println("[12] ServerError instead of timeout: " + message)
+      _ as e => println("[12] other: " + e.to_string())
+    }
+
+    // ---- 13. https=true — TLS connection ----
+    // Point `port` at a TLS-enabled ClickHouse (e.g. 8443 with HTTPS) and the
+    // same API works over TLS. `skip_verify=true` disables certificate
+    // validation for self-signed setups. Against the local plain-HTTP server
+    // the handshake fails — the driver surfaces it as a connection error.
+    let conn_tls = @lib.connect(
+      host~,
+      port~,
+      user~,
+      password~,
+      database~,
+      client_name="moonbit-cli-tls",
+      https=true,
+      skip_verify=true,
+    )
+    defer conn_tls.close()
+    try {
+      conn_tls.ping()
+      println("[13] https ping ok (server has TLS)")
+    } catch {
+      @lib.DbError::ConnectionError(msg) =>
+        println("[13] https attempt on plain-HTTP server (expected): " + msg)
+      _ as e =>
+        println(
+          "[13] https attempt failed (server has no TLS): " + e.to_string(),
+        )
+    }
+
+    // ---- 14. ConnectionPool — reuse keep-alive connections ----
+    // `conn.pool(size)` keeps up to `size` connections and reuses them across
+    // requests; extra concurrent requests wait for a free connection.
+    let pool = conn.pool(size=3)
+    defer pool.close()
+    pool.ping()
+    let r_p = pool.execute_query("SELECT number FROM numbers(3)")
+    println("[14] pool execute_query: rows=" + r_p.rows.length().to_string())
+    // Three concurrent queries share the pool's 3 connections.
+    @async.with_task_group() <| group => {
+      for _ in 0..<3 {
+        ignore(
+          group.spawn(() => {
+            let rr = pool.execute_query("SELECT count() FROM numbers(1000)")
+            println("    pool task rows=" + rr.rows.length().to_string())
+          }),
+        )
+      }
+    }
+    // Streaming through the pool: the connection is returned on close().
+    let cur_p = pool.execute_stream("SELECT number FROM numbers(5)")
+    let mut pn = 0
+    while true {
+      match cur_p.next() {
+        None => break
+        Some(_) => pn = pn + 1
+      }
+    }
+    cur_p.close()
+    println("[14] pool execute_stream rows=" + pn.to_string())
+
+    // ---- 15. Aggregation (GROUP BY) ----
+    let r_agg = conn.execute_query(
+      "SELECT name, count() AS n FROM demo_drv GROUP BY name ORDER BY n DESC LIMIT 3",
+    )
+    println("[15] GROUP BY top-3:")
+    for row in r_agg.rows {
+      println("    " + row.values[0] + " -> " + row.values[1] + " row(s)")
+    }
+
+    // ---- 16. insert() with a large generated batch ----
+    // The point of insert() is bulk loading: 10k rows streamed as the HTTP
+    // body in one request (no giant VALUES literal).
+    let big_rows : Array[Array[String]] = []
+    for i in 0..<10000 {
+      big_rows.push([
+        i.to_string(),
+        "name_" + i.to_string(),
+        "2024-06-16 00:00:00",
+      ])
+    }
+    conn.insert("demo_drv", ["id", "name", "ts"], big_rows)
+    let r_big = conn.execute_query("SELECT count() AS c FROM demo_drv")
+    println(
+      "[16] insert() 10k rows streamed; total rows=" + r_big.rows[0].values[0],
+    )
+
+    // ---- 17. Identifier parameter — bind a table name ----
+    // ClickHouse >= 25 requires `{name: Identifier}` for identifiers (older
+    // versions accept the untyped `{t}` form). CREATE TABLE keeps a literal
+    // name because CREATE + Identifier substitution is buggy in some
+    // ClickHouse versions; SELECT and DROP use the bound identifier.
+    let id_tbl = "demo_drv_ident"
+    let id_ph = if supports_identifier_param(conn) {
+      "{t: Identifier}"
+    } else {
+      "{t}"
+    }
+    ignore(
+      conn.execute_query(
+        "CREATE TABLE IF NOT EXISTS demo_drv_ident (x Int32) ENGINE = Memory",
+      ),
+    )
+    ignore(
+      conn.execute_query(
+        "INSERT INTO demo_drv_ident VALUES ({x: Int32})",
+        params=Map::from_array([("x", "42")]),
+      ),
+    )
+    let r_id = conn.execute_query(
+      "SELECT sum(x) AS s FROM " + id_ph,
+      params=Map::from_array([("t", id_tbl)]),
+    )
+    println("[17] identifier param sum(x)=" + r_id.rows[0].values[0])
+    ignore(
+      conn.execute_query(
+        "DROP TABLE IF EXISTS " + id_ph,
+        params=Map::from_array([("t", id_tbl)]),
+      ),
+    )
     // ---- Cleanup ----
     ignore(conn.execute_query("DROP TABLE IF EXISTS demo_drv"))
     println("[cleanup] DROP TABLE demo_drv ok")
