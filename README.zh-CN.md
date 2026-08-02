@@ -13,13 +13,14 @@ MoonBit 实现的 ClickHouse **HTTP** 协议驱动——简单、无状态，当
 - **TLS**：`https=true` 走 TLS 连接；`skip_verify=true` 可跳过证书校验（自签名场景）
 - **请求超时**：`timeout_ms` 约束每个请求（以及流式 `next()`），超时抛 `ConnectionError`
 - **响应压缩**：`compress=true` 请求 ClickHouse LZ4 压缩（`compress=1`），驱动自动解压
+- **连接池**：`conn.pool(size)` 复用 keep-alive 连接，避免重复 TCP/TLS 握手
 - 两种参数绑定方式，均基于 ClickHouse 原生 `{name: Type}` 占位符协议：
   - `execute_query(sql, params?)` — **命名**绑定，使用 `{name}` / `{name: Type}`。
     无类型 `{name}` 默认为 `String`，所以表名、标识符、字符串列名书写更自然。
   - `execute(sql, values)` — **位置**绑定，使用 `?`。当同一参数形状在多行重复出现时（典型场景是内联 VALUES INSERT）写法最简洁——不需要为每行发明不重复的名字。
   参数以 `param_<key>=<value>` URL 参数形式传入，由服务端（自动加引号、转义）替换
 - 通过 MoonBit `try-catch` 进行错误处理，定义了 `DbError` suberror（`ServerError` / `ConnectionError`）
-- 每次调用都建立短生命周期 HTTP 连接——无持久状态可泄漏，长时间空闲后无需重连
+- 默认每次请求新建一条连接——无持久状态可泄漏；高 QPS 场景可用 `conn.pool(size)` 复用 keep-alive 连接
 - 兼容 ClickHouse 22.x+（HTTP 接口自 21.x 起稳定）
 
 ## 平台支持
@@ -126,7 +127,7 @@ pub fn connect(
 ) -> Connection
 ```
 
-根据显式参数构造 `Connection` 配置。**不会**建立 TCP 连接——调用是无状态的，每次请求都会建立新的 HTTP 连接。所有新选项均为可选，旧调用方式保持不变。
+根据显式参数构造 `Connection` 配置。**不会**建立 TCP 连接——默认情况下调用是无状态的，每次请求都会建立新的 HTTP 连接。所有新选项均为可选，旧调用方式保持不变。需要复用连接时可用 `conn.pool(size)`（见[连接池](#连接池)）。
 
 | 参数          | 类型     | 说明                                        |
 | ------------- | -------- | ------------------------------------------- |
@@ -158,7 +159,7 @@ pub struct Connection {
 }
 ```
 
-轻量级配置结构——没有持久 socket。每次调用都建立短生命周期 HTTP 连接并在返回时关闭。
+轻量级配置结构——没有持久 socket。默认每次调用都建立短生命周期 HTTP 连接并在返回时关闭。需要跨请求复用连接时见[连接池](#连接池)。
 
 #### `Connection::ping`
 
@@ -281,6 +282,38 @@ while true {
 }
 ```
 
+### 连接池
+
+`Connection` 每个请求都会新建一条 TCP/TLS 连接。高 QPS 或远程/TLS 场景下，重复握手开销不小——`Connection::pool` 复用 keep-alive 连接：
+
+```moonbit nocheck
+let pool = conn.pool(size=4)   // 最多 4 条并发连接
+defer pool.close()
+
+pool.ping()                                    // 与 Connection 相同 API
+let r = pool.execute_query("SELECT count() FROM events")
+pool.insert("events", ["id", "ts"], [["1", "2024-01-01 00:00:00"]])
+let cur = pool.execute_stream("SELECT * FROM events")  // 游标 close 时
+defer cur.close()                                        // 归还连接
+```
+
+- `size` 限制并发连接数；超过时请求排队等待空闲连接
+- 出错的连接会被丢弃重建，绝不回池复用
+- `pool.execute_stream` 完全读完后归还连接；中途放弃则丢弃连接
+- `pool.close()` 关闭空闲连接；使用中的连接归还时关闭
+
+`ConnectionPool` 与 `Connection` 的 API 一一对应：
+
+```moonbit nocheck
+pub async fn ConnectionPool::ping(Self) -> Unit
+pub async fn ConnectionPool::execute_query(Self, String, params? : Map[String, String]) -> ResultSet
+pub async fn ConnectionPool::execute(Self, String, Array[String]) -> ResultSet
+pub async fn ConnectionPool::insert(Self, String, Array[String], Array[Array[String]], format? : InsertFormat) -> Unit
+pub async fn ConnectionPool::execute_stream(Self, String, params? : Map[String, String]) -> ResultSetCursor
+pub fn ConnectionPool::max_size(Self) -> Int
+pub fn ConnectionPool::close(Self) -> Unit
+```
+
 #### `Connection::cancel`
 
 ```moonbit nocheck
@@ -395,9 +428,10 @@ HTTP/1.1
 Host: <host>:<port>
 Authorization: Basic <base64(user:password)>
 X-ClickHouse-Client-Name: <client_name>
-Connection: close
 Content-Length: 0
 ```
+
+不发送 `Connection: close`，因此连接可以保持存活：普通 `Connection` 每次调用后关闭 socket；`ConnectionPool` 会复用同一条连接处理后续请求。
 
 ClickHouse 以 `TabSeparatedWithNamesAndTypes` 响应：
 
@@ -444,10 +478,28 @@ ClickHouse 以 `TabSeparatedWithNamesAndTypes` 响应：
 ## 运行示例 CLI
 
 ```sh
+# 默认连接（127.0.0.1:8123，用户 default）
+moon run cmd/main
+
+# 通过环境变量指向任意 ClickHouse
+CLICKHOUSE_HOST=127.0.0.1 CLICKHOUSE_PORT=38123 \
+CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD=barn \
 moon run cmd/main
 ```
 
-CLI 演示（`cmd/main/main.mbt`）依次演示 ping、参数化 SELECT、`CREATE TABLE`、`execute()`（内联 VALUES）与 `insert()`（流式 TSV body）、`execute_stream()`、异常处理与清理。
+demo（`cmd/main/main.mbt`）覆盖了驱动的主要 API：
+
+- `ping()` 健康检查，以及 `close()` / `cancel()` 语义
+- `execute_query()` — 带**命名** `{name: Type}` 参数的 SELECT / DDL
+- `execute()` — **位置** `?` 绑定（内联 VALUES）
+- `insert()` — 以 HTTP body **流式批量插入**，支持 TSV 与 JSONEachRow
+- `execute_stream()` — **逐行游标**读取，schema 立即可用
+- `to_map()` — 结果转列名映射
+- 错误处理 — 用 `try-catch` 捕获 `ServerError`（表不存在、语法错误）与 `ConnectionError`
+- `compress=true` — LZ4 压缩响应自动解压
+- `timeout_ms` — 慢查询（`SELECT sleep(3)`）在超时后被取消
+- `https=true` — TLS 连接（对纯 HTTP 服务器优雅失败，对开启 TLS 的端口成功）
+- `conn.pool(size)` — 连接池复用 keep-alive 连接，支持并发查询
 
 ## 集成测试（CI）
 

@@ -16,8 +16,8 @@ A ClickHouse **HTTP** driver for MoonBit — simple, portable, and stateless.
   substituted server-side (quoted and escaped automatically).
 - Proper error handling via MoonBit `try-catch` with a `DbError` suberror
   (`ServerError` / `ConnectionError`).
-- Every call opens a short-lived HTTP connection — no persistent state to
-  leak, no need to reconnect after long idle periods.
+- Simple per-request connections by default — no persistent state to leak;
+  opt into keep-alive reuse with `conn.pool(size)` for high-QPS workloads.
 - Compatible with ClickHouse 22.x+ (the HTTP interface has been stable since
   21.x).
 
@@ -118,8 +118,10 @@ pub fn connect(
 ```
 
 Builds a `Connection` config from explicit parameters. Does **not** open a
-TCP connection — calls are stateless and open fresh HTTP connections per
-request. All new options are optional — existing call sites keep working.
+TCP connection — by default calls are stateless and open fresh HTTP
+connections per request. All new options are optional — existing call sites
+keep working. Wrap it with `conn.pool(size)` when you want to reuse
+connections (see [Connection pooling](#connection-pooling)).
 
 | Parameter      | Type     | Description                                        |
 | -------------- | -------- | -------------------------------------------------- |
@@ -153,7 +155,8 @@ pub struct Connection {
 ```
 
 A lightweight config struct — no persistent socket. Every call opens a
-short-lived HTTP connection and closes it on return.
+short-lived HTTP connection and closes it on return. For connection reuse
+across requests, see [Connection pooling](#connection-pooling).
 
 #### `Connection::ping`
 
@@ -255,6 +258,41 @@ while true {
     Some(row) => println(row.values)
   }
 }
+```
+
+### Connection pooling
+
+`Connection` opens a fresh TCP/TLS connection for every request. For
+high-QPS workloads or remote/TLS servers, repeated handshakes add up —
+`Connection::pool` reuses keep-alive connections:
+
+```moonbit nocheck
+let pool = conn.pool(size=4)   // up to 4 concurrent connections
+defer pool.close()
+
+pool.ping()                                    // same API as Connection
+let r = pool.execute_query("SELECT count() FROM events")
+pool.insert("events", ["id", "ts"], [["1", "2024-01-01 00:00:00"]])
+let cur = pool.execute_stream("SELECT * FROM events")  // cursor returns the
+defer cur.close()                                        // connection on close
+```
+
+- `size` bounds concurrent connections; extra requests wait for a free one.
+- Connections that fail are discarded and replaced, never reused.
+- `pool.execute_stream` returns its connection when the stream is fully
+  drained; an abandoned stream drops the connection instead.
+- `pool.close()` closes idle connections; in-flight ones are closed on return.
+
+`ConnectionPool` mirrors the `Connection` API:
+
+```moonbit nocheck
+pub async fn ConnectionPool::ping(Self) -> Unit
+pub async fn ConnectionPool::execute_query(Self, String, params? : Map[String, String]) -> ResultSet
+pub async fn ConnectionPool::execute(Self, String, Array[String]) -> ResultSet
+pub async fn ConnectionPool::insert(Self, String, Array[String], Array[Array[String]], format? : InsertFormat) -> Unit
+pub async fn ConnectionPool::execute_stream(Self, String, params? : Map[String, String]) -> ResultSetCursor
+pub fn ConnectionPool::max_size(Self) -> Int
+pub fn ConnectionPool::close(Self) -> Unit
 ```
 
 #### `Connection::cancel`
@@ -382,9 +420,12 @@ HTTP/1.1
 Host: <host>:<port>
 Authorization: Basic <base64(user:password)>
 X-ClickHouse-Client-Name: <client_name>
-Connection: close
 Content-Length: 0
 ```
+
+No `Connection: close` is sent, so connections can be kept alive: the plain
+`Connection` closes the socket after each call, while `ConnectionPool` reuses
+the same socket for subsequent requests.
 
 ClickHouse replies with `TabSeparatedWithNamesAndTypes`:
 
@@ -443,9 +484,29 @@ semantics, use one of the special engines:
 ## Run the example CLI
 
 ```sh
+# Default connection (127.0.0.1:8123, user `default`)
+moon run cmd/main
+
+# Point it at any ClickHouse via environment variables
+CLICKHOUSE_HOST=127.0.0.1 CLICKHOUSE_PORT=38123 \
+CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD=barn \
 moon run cmd/main
 ```
 
-The CLI demo (`cmd/main/main.mbt`) walks through ping, a parameterised
-SELECT, `CREATE TABLE`, an inline-VALUES INSERT with parameters, a
-parameterised `SELECT … WHERE …`, exception handling, and cleanup.
+The demo (`cmd/main/main.mbt`) walks through every major API:
+
+- `ping()` health check and `close()` / `cancel()` semantics
+- `execute_query()` — SELECT / DDL with **named** `{name: Type}` params
+- `execute()` — **positional** `?` binding (inline VALUES)
+- `insert()` — **streamed bulk insert** as the HTTP body, TSV and
+  JSONEachRow formats
+- `execute_stream()` — **row-by-row cursor** with immediate schema access
+- `to_map()` — result rows as column-name maps
+- Error handling — `ServerError` (missing table, syntax error) and
+  `ConnectionError` caught with `try-catch`
+- `compress=true` — LZ4-compressed responses decoded automatically
+- `timeout_ms` — a slow query (`SELECT sleep(3)`) is cancelled after the
+  configured timeout
+- `https=true` — TLS connection (fails gracefully against a plain-HTTP
+  server, succeeds against a TLS-enabled port)
+- `conn.pool(size)` — pooled keep-alive connections with concurrent queries
