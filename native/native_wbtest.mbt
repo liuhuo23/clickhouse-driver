@@ -304,12 +304,18 @@ test "query packet structure" {
   assert_eq(pr2, 0)
   let (pr3, pos18) = decode_varuint(bytes, pos17)
   assert_eq(pr3, 0)
-  // settings("") + interserver_secret("")
-  let (s1, pos19) = decode_string(bytes, pos18)
-  assert_eq(s1, "")
-  let (s2, pos20) = decode_string(bytes, pos19)
+  // settings：low_cardinality_allow_in_native_format + IMPORTANT(1) + "0" + 空串结束
+  let (sname, pos19) = decode_string(bytes, pos18)
+  assert_eq(sname, "low_cardinality_allow_in_native_format")
+  assert_eq(bytes[pos19].to_int(), 1) // SettingsFlags::IMPORTANT
+  let (sval, pos20) = decode_string(bytes, pos19 + 1)
+  assert_eq(sval, "0")
+  let (send, pos20b) = decode_string(bytes, pos20)
+  assert_eq(send, "")
+  // interserver_secret("")
+  let (s2, pos20c) = decode_string(bytes, pos20b)
   assert_eq(s2, "")
-  let (stage, pos21) = decode_varuint(bytes, pos20)
+  let (stage, pos21) = decode_varuint(bytes, pos20c)
   assert_eq(stage, 2) // Complete
   let (comp, pos22) = decode_varuint(bytes, pos21)
   assert_eq(comp, 0) // 无压缩
@@ -457,9 +463,9 @@ async test "unsupported type raises connection error" {
       write_varuint(buf, 1)
       write_varuint(buf, 1)
       write_string(buf, "c")
-      write_string(buf, "IPv4") // 未支持类型
+      write_string(buf, "AggregateFunction(uniq, UInt64)") // 未支持类型
       buf.write_byte(0)
-      write_uint32(buf, 0)
+      write_uint64(buf, 0)
       flush_bytes(writer, buf.to_bytes())
     })
     let result = try {
@@ -700,11 +706,15 @@ test "query packet params encoding" {
   assert_eq(pr2, 0)
   let (pr3, np12) = decode_varuint(bytes, np11)
   assert_eq(pr3, 0)
-  let (s1, np13) = decode_string(bytes, np12)
-  assert_eq(s1, "")
-  let (s2, np14) = decode_string(bytes, np13)
+  let (sname, np13) = decode_string(bytes, np12)
+  assert_eq(sname, "low_cardinality_allow_in_native_format")
+  let (sval, np14) = decode_string(bytes, np13 + 1)
+  assert_eq(sval, "0")
+  let (send, np14b) = decode_string(bytes, np14)
+  assert_eq(send, "")
+  let (s2, np14c) = decode_string(bytes, np14b)
   assert_eq(s2, "")
-  let (stage, np15) = decode_varuint(bytes, np14)
+  let (stage, np15) = decode_varuint(bytes, np14c)
   assert_eq(stage, 2)
   let (comp, np16) = decode_varuint(bytes, np15)
   assert_eq(comp, 0)
@@ -744,13 +754,174 @@ test "query packet empty params" {
   let (_, np10) = decode_varuint(bytes, np9 + 1)
   let (_, np11) = decode_varuint(bytes, np10)
   let (_, np12) = decode_varuint(bytes, np11)
-  let (_, np13) = decode_string(bytes, np12) // settings
-  let (_, np14) = decode_string(bytes, np13) // interserver
-  let (_, np15) = decode_varuint(bytes, np14)
+  let (_, np13) = decode_string(bytes, np12) // settings name
+  let (_, np14) = decode_string(bytes, np13 + 1) // settings value
+  let (_, np14b) = decode_string(bytes, np14) // settings end
+  let (_, np14c) = decode_string(bytes, np14b) // interserver
+  let (_, np15) = decode_varuint(bytes, np14c)
   let (_, np16) = decode_varuint(bytes, np15)
   let (sql, np17) = decode_string(bytes, np16)
   assert_eq(sql, "SELECT 1")
   let (pend, np18) = decode_string(bytes, np17) // params 空表
   assert_eq(pend, "")
   assert_eq(np18, bytes.length())
+}
+
+///|
+test "uuid formatting" {
+  // 123e4567-e89b-12d3-a456-426614174000
+  // 存储：先高 64 位小端（d3 12 9b e8 67 45 3e 12），再低 64 位小端（00 40 17 14 66 42 56 a4）
+  let bytes = b"\xd3\x12\x9b\xe8\x67\x45\x3e\x12\x00\x40\x17\x14\x66\x42\x56\xa4"
+  let (hi, _) = decode_uint64(bytes, 0)
+  let (lo, _) = decode_uint64(bytes, 8)
+  assert_eq(format_uuid(lo, hi), "123e4567-e89b-12d3-a456-426614174000")
+  // 全零
+  assert_eq(format_uuid(0, 0), "00000000-0000-0000-0000-000000000000")
+}
+
+///|
+test "ipv6 formatting" {
+  // ::1 = 00...01
+  let ip6_1 = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
+  assert_eq(format_ipv6(ip6_1), "::1")
+  // 2001:db8::1
+  let ip6_2 = b"\x20\x01\x0d\xb8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
+  assert_eq(format_ipv6(ip6_2), "2001:db8::1")
+  // fe80::1
+  let ip6_3 = b"\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
+  assert_eq(format_ipv6(ip6_3), "fe80::1")
+  // 无压缩：1:2:3:4:5:6:7:8
+  let ip6_4 = b"\x00\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00\x06\x00\x07\x00\x08"
+  assert_eq(format_ipv6(ip6_4), "1:2:3:4:5:6:7:8")
+}
+
+///|
+test "ipv4 formatting" {
+  // 127.0.0.1 = UInt32 0x7F000001 小端
+  assert_eq(format_ipv4(b"\x01\x00\x00\x7f"), "127.0.0.1")
+  assert_eq(format_ipv4(b"\x00\x00\x00\x00"), "0.0.0.0")
+  assert_eq(format_ipv4(b"\x0a\x00\x00\xc0"), "192.0.0.10")
+}
+
+///|
+async test "decimal big formatting" {
+  let d128 = read_decimal_big_async(
+    b"\x83\x1a\x99\xbe\x1c\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16,
+  )
+  assert_eq(format_big_decimal(d128, 3), "123456789.123")
+  let d256 = read_decimal_big_async(
+    b"\x96\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+    32,
+  )
+  assert_eq(format_big_decimal(d256, 2), "1.5")
+  let neg = read_decimal_big_async(
+    b"\xc7\xcf\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff", 16,
+  )
+  assert_eq(format_big_decimal(neg, 2), "-123.45")
+}
+
+///|
+test "split top level" {
+  let parts = split_top_level("Int32, String, Nullable(Int64)")
+  assert_eq(parts.length(), 3)
+  assert_eq(parts[0], "Int32")
+  assert_eq(parts[1], "String")
+  assert_eq(parts[2], "Nullable(Int64)")
+  let parts2 = split_top_level("Array(Int32), Tuple(String, Int64)")
+  assert_eq(parts2.length(), 2)
+  assert_eq(parts2[0], "Array(Int32)")
+  assert_eq(parts2[1], "Tuple(String, Int64)")
+}
+
+///|
+test "enum map parsing" {
+  let map = parse_enum_map("Enum8('a' = 1, 'b' = 2)")
+  assert_eq(map.length(), 2)
+  assert_eq(map[0].0, 1)
+  assert_eq(map[0].1, "a")
+  assert_eq(map[1].0, 2)
+  assert_eq(map[1].1, "b")
+}
+
+///|
+test "nested value formatting" {
+  assert_eq(format_nested_value(""), "NULL")
+  assert_eq(format_nested_value("42"), "42")
+  assert_eq(format_nested_value("hello"), "'hello'")
+  assert_eq(format_nested_value("[1,2]"), "[1,2]")
+}
+
+///|
+/// 用 MemoryReader 调用 read_decimal_big。
+async fn read_decimal_big_async(bytes : Bytes, n : Int) -> @bigint.BigInt {
+  let reader = @io.MemoryReader::MemoryReader(fn(writer) {
+    flush_bytes(writer, bytes)
+  })
+  let v = read_decimal_big(reader, n)
+  reader.close()
+  v
+}
+
+///|
+async test "decimal write roundtrip" {
+  let reader = @io.MemoryReader::MemoryReader(fn(writer) {
+    let buf = Buffer::Buffer()
+    write_value(buf, "Decimal(38, 3)", "123456789.123")
+    write_value(buf, "Decimal(9, 2)", "-0.50")
+    write_value(buf, "Decimal(76, 2)", "1.5")
+    flush_bytes(writer, buf.to_bytes())
+  })
+  let d1 = read_decimal(reader, "Decimal(38, 3)")
+  let d2 = read_decimal(reader, "Decimal(9, 2)")
+  let d3 = read_decimal(reader, "Decimal(76, 2)")
+  reader.close()
+  assert_eq(d1, "123456789.123")
+  assert_eq(d2, "-0.5")
+  assert_eq(d3, "1.5")
+}
+
+///|
+test "write uuid and ipv4" {
+  let buf = Buffer::Buffer()
+  write_uuid_value(buf, "123e4567-e89b-12d3-a456-426614174000")
+  write_uuid_value(buf, "00000000-0000-0000-0000-000000000000")
+  write_ipv4(buf, "127.0.0.1")
+  write_ipv4(buf, "0.0.0.0")
+  let bytes = buf.to_bytes()
+  // UUID 高 64 位小端在前
+  let (hi, p1) = decode_uint64(bytes, 0)
+  let (lo, p2) = decode_uint64(bytes, 8)
+  assert_eq(format_uuid(lo, hi), "123e4567-e89b-12d3-a456-426614174000")
+  let (hi2, p3) = decode_uint64(bytes, 16)
+  let (lo2, p4) = decode_uint64(bytes, 24)
+  assert_eq(format_uuid(lo2, hi2), "00000000-0000-0000-0000-000000000000")
+  // IPv4：UInt32 小端（127.0.0.1 → 01 00 00 7f）
+  assert_eq(bytes[p4].to_int(), 0x01)
+  assert_eq(bytes[p4 + 3].to_int(), 0x7f)
+  assert_eq(bytes[p4 + 4].to_int(), 0x00)
+  assert_eq(bytes[p4 + 7].to_int(), 0x00)
+}
+
+///|
+test "write enum" {
+  let buf = Buffer::Buffer()
+  write_enum(buf, "Enum8('a' = 1, 'b' = 2)", "a", 1)
+  write_enum(buf, "Enum8('a' = 1, 'b' = 2)", "b", 1)
+  write_enum(buf, "Enum8('a' = 1, 'b' = 2)", "2", 1)
+  let bytes = buf.to_bytes()
+  assert_eq(bytes[0].to_int(), 1)
+  assert_eq(bytes[1].to_int(), 2)
+  assert_eq(bytes[2].to_int(), 2)
+}
+
+///|
+test "parse decimal string" {
+  let v1 = parse_decimal_string("123456789.123", 3)
+  assert_eq(v1.to_string(), "123456789123")
+  let v2 = parse_decimal_string("-0.5", 2)
+  assert_eq(v2.to_string(), "-50")
+  let v3 = parse_decimal_string("1.5", 2)
+  assert_eq(v3.to_string(), "150")
+  let v4 = parse_decimal_string("7", 0)
+  assert_eq(v4.to_string(), "7")
 }

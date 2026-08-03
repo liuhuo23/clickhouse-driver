@@ -308,3 +308,113 @@ async test "native integration: execute_stream with params and early close" {
   assert_eq(rs.rows[0].values[0], "2")
   conn.close()
 }
+
+///|
+async test "native integration: array and tuple types" {
+  require_integration()
+  let conn = make_conn()
+  let rs = conn.execute_query(
+    "SELECT [1, 2, 3] AS arr, [] AS empty_arr, [[1,2],[3]] AS arr2, " +
+    "(1, 'x', 1.5) AS t",
+  )
+  assert_eq(rs.rows.length(), 1)
+  assert_eq(rs.rows[0].values[0], "[1,2,3]")
+  assert_eq(rs.rows[0].values[1], "[]")
+  assert_eq(rs.rows[0].values[2], "[[1,2],[3]]")
+  assert_eq(rs.rows[0].values[3], "(1,'x',1.5)")
+  conn.close()
+}
+
+///|
+async test "native integration: map type" {
+  require_integration()
+  let conn = make_conn()
+  let rs = conn.execute_query("SELECT map('k1', 10, 'k2', 20) AS m")
+  assert_eq(rs.rows[0].values[0], "{'k1':10,'k2':20}")
+  conn.close()
+}
+
+///|
+async test "native integration: decimal types" {
+  require_integration()
+  let conn = make_conn()
+  let rs = conn.execute_query(
+    "SELECT toDecimal32(1.23, 2) AS d32, toDecimal64(45678.12, 2) AS d64, " +
+    "toDecimal128(123456789.123, 3) AS d128, toDecimal256(1.50, 2) AS d256, " +
+    "toDecimal32(1.00, 2) AS d_int",
+  )
+  assert_eq(rs.rows[0].values[0], "1.23")
+  assert_eq(rs.rows[0].values[1], "45678.12")
+  assert_eq(rs.rows[0].values[2], "123456789.123")
+  assert_eq(rs.rows[0].values[3], "1.5")
+  assert_eq(rs.rows[0].values[4], "1")
+  conn.close()
+}
+
+///|
+async test "native integration: uuid ip datetime64 enum" {
+  require_integration()
+  let conn = make_conn()
+  let rs = conn.execute_query(
+    "SELECT toUUID('123e4567-e89b-12d3-a456-426614174000') AS u, " +
+    "toIPv4('127.0.0.1') AS ip4, toIPv6('::1') AS ip6, " +
+    "toIPv6('2001:db8::1') AS ip6b, " +
+    "toDateTime64('2026-08-03 12:34:56.123', 3) AS dt64, " +
+    "CAST(1 AS Enum8('a' = 1, 'b' = 2)) AS e",
+  )
+  assert_eq(rs.rows[0].values[0], "123e4567-e89b-12d3-a456-426614174000")
+  assert_eq(rs.rows[0].values[1], "127.0.0.1")
+  assert_eq(rs.rows[0].values[2], "::1")
+  assert_eq(rs.rows[0].values[3], "2001:db8::1")
+  assert_eq(rs.rows[0].values[4], "2026-08-03 12:34:56.123")
+  assert_eq(rs.rows[0].values[5], "a")
+  conn.close()
+}
+
+///|
+async test "native integration: nullable array and low cardinality" {
+  require_integration()
+  let conn = make_conn()
+  let rs = conn.execute_query(
+    "SELECT CAST([1, NULL, 3] AS Array(Nullable(Int32))) AS na, " +
+    "toLowCardinality('hello') AS lc",
+  )
+  assert_eq(rs.rows[0].values[0], "[1,NULL,3]")
+  // low_cardinality_allow_in_native_format=0 时服务器返回 String
+  assert_eq(rs.rows[0].values[1], "hello")
+  assert_eq(rs.columns[1].type_, "String")
+  conn.close()
+}
+
+///|
+async test "native integration: insert complex scalar types" {
+  require_integration()
+  let conn = make_conn()
+  ignore(conn.execute_query("DROP TABLE IF EXISTS native_scalars"))
+  ignore(
+    conn.execute_query(
+      "CREATE TABLE native_scalars (id UInt32, d Decimal(38,3), u UUID, ip IPv4, e Enum8('a' = 1, 'b' = 2), dt DateTime64(3)) ENGINE = Memory",
+    ),
+  )
+  conn.insert("native_scalars", ["id", "d", "u", "ip", "e", "dt"], [
+    [
+      "1", "123456789.123", "123e4567-e89b-12d3-a456-426614174000", "127.0.0.1",
+      "a", "2026-08-03 12:34:56.123",
+    ],
+    [
+      "2", "-0.5", "00000000-0000-0000-0000-000000000000", "192.168.1.1", "b", "2026-08-03 00:00:00.5",
+    ],
+  ])
+  let rs = conn.execute_query("SELECT * FROM native_scalars ORDER BY id")
+  assert_eq(rs.rows.length(), 2)
+  assert_eq(rs.rows[0].values[1], "123456789.123")
+  assert_eq(rs.rows[0].values[2], "123e4567-e89b-12d3-a456-426614174000")
+  assert_eq(rs.rows[0].values[3], "127.0.0.1")
+  assert_eq(rs.rows[0].values[4], "a")
+  assert_eq(rs.rows[0].values[5], "2026-08-03 12:34:56.123")
+  assert_eq(rs.rows[1].values[1], "-0.5")
+  assert_eq(rs.rows[1].values[3], "192.168.1.1")
+  assert_eq(rs.rows[1].values[4], "b")
+  ignore(conn.execute_query("DROP TABLE IF EXISTS native_scalars"))
+  conn.close()
+}
