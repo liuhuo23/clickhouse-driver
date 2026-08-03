@@ -125,7 +125,8 @@ async fn main {
 块上传）与 `cancel`，类型支持丰富：UInt8–64、Int8–64、Float32/64、String、
 FixedString、Date、Date32、DateTime、DateTime64、Enum8/16、Nullable、Array
 （可嵌套）、Tuple、Map、Decimal32/64/128/256、UUID、IPv4、IPv6（LowCardinality
-由服务器端解包）；服务器异常映射、优雅关闭。压缩与 TLS 列入后续阶段。
+由服务器端解包）、**LZ4 压缩**（Data 块，`compress=true`）；服务器异常映射、
+优雅关闭。TLS 列入后续阶段。
 
 ### 快速开始
 

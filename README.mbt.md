@@ -117,8 +117,9 @@ Current capabilities: connect + handshake, `ping`, `execute_query` /
 upload) and `cancel`, with rich type support: UInt8–64, Int8–64, Float32/64,
 String, FixedString, Date, Date32, DateTime, DateTime64, Enum8/16, Nullable,
 Array (nested), Tuple, Map, Decimal32/64/128/256, UUID, IPv4, IPv6 (and
-LowCardinality via server-side unwrapping), server exception mapping, and
-graceful close. Compression and TLS are planned for later stages.
+LowCardinality via server-side unwrapping), **LZ4 compression** (Data
+blocks, `compress=true`), server exception mapping, and graceful close.
+TLS is planned for later stages.
 
 ### Quick start
 
