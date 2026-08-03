@@ -524,3 +524,70 @@ async test "native integration: compressed mode" {
   }
   assert_true(not(caught))
 }
+
+///|
+async test "native integration: connection pool" {
+  require_integration()
+  let (host, port) = native_env()
+  let pool = @native.native_config(
+    host~,
+    port~,
+    user="default",
+    password="barn",
+    database="default",
+  ).pool(size=2)
+  // 池查询
+  let rs = pool.execute_query("SELECT number AS n FROM numbers(3)")
+  assert_eq(rs.rows.length(), 3)
+  // 池 INSERT + 读回
+  ignore(pool.execute_query("DROP TABLE IF EXISTS native_pool"))
+  ignore(
+    pool.execute_query(
+      "CREATE TABLE native_pool (id UInt32, s String) ENGINE = Memory",
+    ),
+  )
+  pool.insert("native_pool", ["id", "s"], [["1", "a"], ["2", "b"]])
+  let rs2 = pool.execute_query("SELECT * FROM native_pool ORDER BY id")
+  assert_eq(rs2.rows[0].values[1], "a")
+  ignore(pool.execute_query("DROP TABLE IF EXISTS native_pool"))
+  // 池流式游标
+  let cur = pool.execute_stream("SELECT number AS n FROM numbers(5)")
+  let mut count = 0
+  while true {
+    match cur.next() {
+      Some(_) => count = count + 1
+      None => break
+    }
+  }
+  cur.close()
+  assert_eq(count, 5)
+  // 池 ping
+  pool.ping()
+  // 连续查询复用连接
+  for i in 0..<5 {
+    let r = pool.execute_query("SELECT " + i.to_string() + " AS x")
+    assert_eq(r.rows[0].values[0], i.to_string())
+  }
+  pool.close()
+}
+
+///|
+async test "native integration: pool size 1 serial" {
+  require_integration()
+  let (host, port) = native_env()
+  let pool = @native.native_config(
+    host~,
+    port~,
+    user="default",
+    password="barn",
+    database="default",
+  ).pool(size=1)
+  // 单连接串行执行多个查询
+  let mut sum = 0
+  for i in 0..<10 {
+    let r = pool.execute_query("SELECT " + i.to_string() + " AS x")
+    sum = sum + parse_int(r.rows[0].values[0], 0)
+  }
+  assert_eq(sum, 45)
+  pool.close()
+}
