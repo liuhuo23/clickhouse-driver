@@ -925,3 +925,15 @@ test "parse decimal string" {
   let v4 = parse_decimal_string("7", 0)
   assert_eq(v4.to_string(), "7")
 }
+
+///|
+test "timezone offset parsing" {
+  assert_eq(timezone_offset("DateTime('Asia/Shanghai')"), 480)
+  assert_eq(timezone_offset("DateTime64(3, 'Asia/Shanghai')"), 480)
+  assert_eq(timezone_offset("DateTime('UTC')"), 0)
+  assert_eq(timezone_offset("DateTime('Etc/GMT-3')"), 180)
+  assert_eq(timezone_offset("DateTime('Etc/GMT+5')"), -300)
+  assert_eq(timezone_offset("DateTime"), 0)
+  assert_eq(timezone_offset("DateTime('America/New_York')"), -300)
+  assert_eq(timezone_offset("DateTime('Asia/Tokyo')"), 540)
+}

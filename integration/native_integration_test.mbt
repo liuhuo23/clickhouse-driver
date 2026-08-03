@@ -418,3 +418,45 @@ async test "native integration: insert complex scalar types" {
   ignore(conn.execute_query("DROP TABLE IF EXISTS native_scalars"))
   conn.close()
 }
+
+///|
+async test "native integration: bool interval timezone" {
+  require_integration()
+  let conn = make_conn()
+  let rs = conn.execute_query(
+    "SELECT CAST(1 AS Bool) AS b_true, CAST(0 AS Bool) AS b_false, " +
+    "toIntervalDay(3) AS iv, toIntervalSecond(90) AS iv2, " +
+    "toDateTime('2026-08-03 12:34:56', 'Asia/Shanghai') AS dt_sh, " +
+    "toDateTime64('2026-08-03 12:34:56.123', 3, 'Asia/Shanghai') AS dt64_sh",
+  )
+  assert_eq(rs.rows[0].values[0], "true")
+  assert_eq(rs.rows[0].values[1], "false")
+  assert_eq(rs.rows[0].values[2], "3")
+  assert_eq(rs.rows[0].values[3], "90")
+  assert_eq(rs.rows[0].values[4], "2026-08-03 12:34:56")
+  assert_eq(rs.rows[0].values[5], "2026-08-03 12:34:56.123")
+  conn.close()
+}
+
+///|
+async test "native integration: insert bool and interval" {
+  require_integration()
+  let conn = make_conn()
+  ignore(conn.execute_query("DROP TABLE IF EXISTS native_bi"))
+  ignore(
+    conn.execute_query(
+      "CREATE TABLE native_bi (id UInt32, flag Bool, iv IntervalDay) ENGINE = Memory",
+    ),
+  )
+  conn.insert("native_bi", ["id", "flag", "iv"], [
+    ["1", "true", "5"],
+    ["2", "false", "0"],
+  ])
+  let rs = conn.execute_query("SELECT id, flag, iv FROM native_bi ORDER BY id")
+  assert_eq(rs.rows[0].values[1], "true")
+  assert_eq(rs.rows[0].values[2], "5")
+  assert_eq(rs.rows[1].values[1], "false")
+  assert_eq(rs.rows[1].values[2], "0")
+  ignore(conn.execute_query("DROP TABLE IF EXISTS native_bi"))
+  conn.close()
+}
