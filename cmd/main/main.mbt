@@ -75,6 +75,11 @@ async fn supports_identifier_param(conn : @lib.Connection) -> Bool {
 /// inline-VALUES INSERT; `insert()` streams bulk rows as the HTTP body;
 /// `execute_stream()` reads large result sets row by row.
 async fn main {
+  // 原生协议（TCP 9000）演示：CLICKHOUSE_NATIVE=1 时走 native 分支
+  if @env.get_env_var("CLICKHOUSE_NATIVE") == Some("1") {
+    run_native_demo()
+    return
+  }
   // Connection settings come from env vars (CLICKHOUSE_HOST / CLICKHOUSE_PORT /
   // CLICKHOUSE_USER / CLICKHOUSE_PASSWORD / CLICKHOUSE_DATABASE) with sensible
   // defaults, so the same demo works against any ClickHouse:

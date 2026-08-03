@@ -2,6 +2,7 @@ import {
   "moonbitlang/async",
   "moonbitlang/core/env",
   "liuhuo23/clickhouse-driver" @lib,
+  "liuhuo23/clickhouse-driver/native",
 }
 
 pkgtype(kind: "executable")
