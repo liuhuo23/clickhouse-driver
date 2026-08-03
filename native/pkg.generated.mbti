@@ -1,0 +1,84 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "liuhuo23/clickhouse-driver/native"
+
+import {
+  "liuhuo23/clickhouse-driver",
+  "moonbitlang/async/io",
+}
+
+// Values
+pub async fn connect(NativeConfig) -> NativeConnection
+
+pub async fn[W : @io.Writer] flush_bytes(W, Bytes) -> Unit
+
+pub fn native_config(host~ : String, port? : Int, user~ : String, password~ : String, database? : String, client_name? : String, timeout_ms? : Int) -> NativeConfig
+
+pub async fn[R : @io.Reader] read_exception(R) -> @clickhouse-driver.DbError
+
+pub async fn[R : @io.Reader] read_float32(R) -> Float
+
+pub async fn[R : @io.Reader] read_float64(R) -> Double
+
+pub async fn[R : @io.Reader] read_int32(R) -> Int
+
+pub async fn[R : @io.Reader] read_int64(R) -> Int64
+
+pub async fn[R : @io.Reader] read_server_hello(R) -> ServerHello
+
+pub async fn[R : @io.Reader] read_string(R) -> String
+
+pub async fn[R : @io.Reader] read_uint16(R) -> UInt16
+
+pub async fn[R : @io.Reader] read_uint32(R) -> UInt
+
+pub async fn[R : @io.Reader] read_uint64(R) -> UInt64
+
+pub async fn[R : @io.Reader] read_varuint(R) -> UInt64
+
+// Errors
+
+// Types and methods
+type BlockData
+
+type ClientPacket
+
+type ColumnHeader
+
+pub struct NativeConfig {
+  host : String
+  port : Int
+  user : String
+  password : String
+  database : String
+  client_name : String
+  timeout_ms : Int
+}
+
+pub struct NativeConnection {
+  // private fields
+}
+pub async fn NativeConnection::cancel(Self) -> Unit
+pub fn NativeConnection::close(Self) -> Unit
+pub async fn NativeConnection::execute(Self, String, Array[String]) -> @clickhouse-driver.ResultSet
+pub async fn NativeConnection::execute_query(Self, String, params? : Map[String, String]) -> @clickhouse-driver.ResultSet
+pub async fn NativeConnection::execute_stream(Self, String, params? : Map[String, String]) -> NativeResultSetCursor
+pub async fn NativeConnection::insert(Self, String, Array[String], Array[Array[String]]) -> Unit
+pub async fn NativeConnection::ping(Self) -> Unit
+pub fn NativeConnection::server_timezone(Self) -> String
+pub fn NativeConnection::server_version(Self) -> String
+
+pub struct NativeResultSetCursor {
+  // private fields
+}
+pub async fn NativeResultSetCursor::close(Self) -> Unit
+pub fn NativeResultSetCursor::columns(Self) -> Array[@clickhouse-driver.Column]
+pub async fn NativeResultSetCursor::next(Self) -> @clickhouse-driver.Row?
+
+type ServerHello
+
+type ServerPacket
+
+// Type aliases
+
+// Traits
+
