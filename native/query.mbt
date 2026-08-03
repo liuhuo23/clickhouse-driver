@@ -31,7 +31,12 @@ fn build_query_packet(
   write_varuint(buf, 0) // count_participating_replicas
   write_varuint(buf, 0) // number_of_current_replica
   // --- settings（字符串表，null 结尾）---
-  write_string(buf, "")
+  // 让服务器移除 LowCardinality 包装（native 输出为原始类型），
+  // 避免客户端实现复杂的低基数字典序列化
+  write_string(buf, "low_cardinality_allow_in_native_format")
+  buf.write_byte(0x1) // SettingsFlags::IMPORTANT
+  write_string(buf, "0")
+  write_string(buf, "") // 结束
   // --- interserver_secret (rev >= 54441) ---
   write_string(buf, "")
   write_varuint(buf, 2) // stage: Complete
