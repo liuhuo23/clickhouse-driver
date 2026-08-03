@@ -61,6 +61,7 @@ pub struct NativeConfig {
   timeout_ms : Int
   compress : Bool
 }
+pub fn NativeConfig::pool(Self, size? : Int) -> NativeConnectionPool
 
 pub struct NativeConnection {
   // private fields
@@ -74,6 +75,24 @@ pub async fn NativeConnection::insert(Self, String, Array[String], Array[Array[S
 pub async fn NativeConnection::ping(Self) -> Unit
 pub fn NativeConnection::server_timezone(Self) -> String
 pub fn NativeConnection::server_version(Self) -> String
+
+pub struct NativeConnectionPool {
+  // private fields
+}
+pub fn NativeConnectionPool::close(Self) -> Unit
+pub async fn NativeConnectionPool::execute(Self, String, Array[String]) -> @clickhouse-driver.ResultSet
+pub async fn NativeConnectionPool::execute_query(Self, String, params? : Map[String, String]) -> @clickhouse-driver.ResultSet
+pub async fn NativeConnectionPool::execute_stream(Self, String, params? : Map[String, String]) -> NativePooledCursor
+pub async fn NativeConnectionPool::insert(Self, String, Array[String], Array[Array[String]]) -> Unit
+pub fn NativeConnectionPool::max_size(Self) -> Int
+pub async fn NativeConnectionPool::ping(Self) -> Unit
+
+pub struct NativePooledCursor {
+  // private fields
+}
+pub async fn NativePooledCursor::close(Self) -> Unit
+pub fn NativePooledCursor::columns(Self) -> Array[@clickhouse-driver.Column]
+pub async fn NativePooledCursor::next(Self) -> @clickhouse-driver.Row?
 
 pub struct NativeResultSetCursor {
   // private fields
