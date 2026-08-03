@@ -19,6 +19,8 @@ pub struct NativeConfig {
   client_name : String
   /// 每次读写超时（毫秒）；`0` = 无超时（默认）。当前阶段未生效，后续阶段接入。
   timeout_ms : Int
+  /// 是否启用 LZ4 压缩（原生协议压缩块，Data/Totals/Extremes 包）。
+  compress : Bool
 }
 
 ///|
@@ -34,8 +36,9 @@ pub fn native_config(
   database? : String = "default",
   client_name? : String = "moonbit-clickhouse-native",
   timeout_ms? : Int = 0,
+  compress? : Bool = false,
 ) -> NativeConfig {
-  { host, port, user, password, database, client_name, timeout_ms }
+  { host, port, user, password, database, client_name, timeout_ms, compress }
 }
 
 ///|
@@ -44,6 +47,8 @@ pub struct NativeConnection {
   priv tcp : @socket.Tcp
   priv server : ServerHello
   priv config : NativeConfig
+  /// 压缩模式（协商 compression=1 后 Data 块为 LZ4 压缩块）。
+  priv compress : Bool
 }
 
 ///|
@@ -98,7 +103,7 @@ pub async fn connect(config : NativeConfig) -> NativeConnection {
       )
     }
   }
-  { tcp, server, config }
+  { tcp, server, config, compress: config.compress }
 }
 
 ///|

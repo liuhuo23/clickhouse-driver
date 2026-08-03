@@ -9,29 +9,38 @@ fn build_insert_sql(table : String, columns : Array[String]) -> String {
 fn build_data_packet(
   headers : Array[ColumnHeader],
   rows : Array[Array[String]],
+  compress : Bool,
 ) -> Bytes raise {
   let buf = Buffer::Buffer()
   write_varuint(buf, ClientPacket::Data.to_int().to_uint64())
-  write_string(buf, "") // table name
-  write_varuint(buf, 1)
-  buf.write_byte(0)
-  write_varuint(buf, 2)
-  write_int32(buf, -1)
-  write_varuint(buf, 0)
-  write_varuint(buf, headers.length().to_uint64())
+  write_string(buf, "") // table name（明文）
+  // block 内容（BlockInfo + 列头 + 列数据）
+  let block = Buffer::Buffer()
+  write_varuint(block, 1)
+  block.write_byte(0)
+  write_varuint(block, 2)
+  write_int32(block, -1)
+  write_varuint(block, 0)
+  write_varuint(block, headers.length().to_uint64())
   let nrows = rows.length()
-  write_varuint(buf, nrows.to_uint64())
+  write_varuint(block, nrows.to_uint64())
   for c in 0..<headers.length() {
     let h = headers[c]
-    write_string(buf, h.name)
-    write_string(buf, h.type_)
-    buf.write_byte(0) // has_custom_serialization = false
+    write_string(block, h.name)
+    write_string(block, h.type_)
+    block.write_byte(0) // has_custom_serialization = false
     // 提取该列所有行的值
     let values : Array[String] = Array::make(nrows, "")
     for r in 0..<nrows {
       values[r] = rows[r][c]
     }
-    write_column_values(buf, h.type_, values)
+    write_column_values(block, h.type_, values)
+  }
+  let block_bytes = block.to_bytes()
+  if compress {
+    write_compressed_block(buf, block_bytes)
+  } else {
+    buf.write_bytes(block_bytes)
   }
   buf.to_bytes()
 }
@@ -49,26 +58,32 @@ pub async fn NativeConnection::insert(
   rows : Array[Array[String]],
 ) -> Unit {
   let sql = build_insert_sql(table, columns)
-  flush_bytes(self.tcp, build_query_packet(self.config.client_name, sql))
-  flush_bytes(self.tcp, build_empty_data_packet())
+  flush_bytes(
+    self.tcp,
+    build_query_packet(self.config.client_name, sql, compress=self.compress),
+  )
+  flush_bytes(self.tcp, build_empty_data_packet(self.compress))
   // 等待 SampleBlock（含列名与列类型）
-  let sample = read_sample_block(self.tcp)
+  let sample = read_sample_block(self.tcp, self.compress)
   // 上传数据块 + 结束块
-  flush_bytes(self.tcp, build_data_packet(sample.headers, rows))
-  flush_bytes(self.tcp, build_empty_data_packet())
+  flush_bytes(self.tcp, build_data_packet(sample.headers, rows, self.compress))
+  flush_bytes(self.tcp, build_empty_data_packet(self.compress))
   // 读取响应直到 EndOfStream
-  read_insert_response(self.tcp)
+  read_insert_response(self.tcp, self.compress)
 }
 
 ///|
 /// 读取 INSERT 的 SampleBlock：跳过 TableColumns，等待首个 Data 块列头。
-async fn[R : @io.Reader] read_sample_block(reader : R) -> BlockData {
+async fn[R : @io.Reader] read_sample_block(
+  reader : R,
+  compress : Bool,
+) -> BlockData {
   while true {
     let ptype = read_varuint(reader)
     match ServerPacket::from_int(ptype.to_int()) {
       Data => {
         ignore(read_string(reader)) // 表名
-        return read_block(reader)
+        return read_data_block(reader, compress)
       }
       TableColumns => {
         // 2 个字符串（multistring）
@@ -95,7 +110,10 @@ async fn[R : @io.Reader] read_sample_block(reader : R) -> BlockData {
 
 ///|
 /// 读取 INSERT 响应直到 EndOfStream。
-async fn[R : @io.Reader] read_insert_response(reader : R) -> Unit {
+async fn[R : @io.Reader] read_insert_response(
+  reader : R,
+  compress : Bool,
+) -> Unit {
   while true {
     let ptype = read_varuint(reader)
     match ServerPacket::from_int(ptype.to_int()) {
@@ -103,7 +121,7 @@ async fn[R : @io.Reader] read_insert_response(reader : R) -> Unit {
       Exception => raise read_exception(reader)
       Data => {
         ignore(read_string(reader))
-        ignore(read_block(reader))
+        ignore(read_data_block(reader, compress))
       }
       Progress =>
         for _ in 0..<6 {
@@ -117,9 +135,13 @@ async fn[R : @io.Reader] read_insert_response(reader : R) -> Unit {
         ignore(read_varuint(reader))
         ignore(reader_byte(reader))
       }
-      Log | ProfileEvents | Totals | Extremes => {
+      Log | ProfileEvents => {
         ignore(read_string(reader))
         ignore(read_block(reader))
+      }
+      Totals | Extremes => {
+        ignore(read_string(reader))
+        ignore(read_data_block(reader, compress))
       }
       _ => () // 忽略其他包
     }

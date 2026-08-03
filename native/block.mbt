@@ -72,3 +72,22 @@ async fn[R : @io.Reader] read_block(reader : R) -> BlockData {
   }
   { headers, rows }
 }
+
+///|
+/// 读取一个 Data 包的数据块：压缩模式读压缩块并解压后解析。
+async fn[R : @io.Reader] read_data_block(
+  reader : R,
+  compress : Bool,
+) -> BlockData {
+  if not(compress) {
+    // 非压缩：数据块直接是 NativeWriter 格式（BlockInfo + 列头 + 数据）
+    return read_block(reader)
+  }
+  let payload = read_payload(reader, true)
+  let mr = @io.MemoryReader::MemoryReader(fn(writer) {
+    flush_bytes(writer, payload)
+  })
+  let block = read_block(mr)
+  mr.close()
+  block
+}

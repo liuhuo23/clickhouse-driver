@@ -25,9 +25,14 @@ pub async fn NativeConnection::execute_stream(
 ) -> NativeResultSetCursor {
   flush_bytes(
     self.tcp,
-    build_query_packet(self.config.client_name, sql, params~),
+    build_query_packet(
+      self.config.client_name,
+      sql,
+      compress=self.compress,
+      params~,
+    ),
   )
-  flush_bytes(self.tcp, build_empty_data_packet())
+  flush_bytes(self.tcp, build_empty_data_packet(self.compress))
   let cursor = {
     conn: self,
     cols: [[]],
@@ -50,7 +55,7 @@ async fn NativeResultSetCursor::prepare_first_block(
     match ServerPacket::from_int(ptype.to_int()) {
       Data => {
         ignore(read_string(self.conn.tcp)) // 表名
-        let block = read_block(self.conn.tcp)
+        let block = read_data_block(self.conn.tcp, self.conn.compress)
         if block.headers.length() == 0 {
           continue // 空块
         }
@@ -83,9 +88,13 @@ async fn NativeResultSetCursor::prepare_first_block(
         ignore(read_varuint(self.conn.tcp))
         ignore(reader_byte(self.conn.tcp))
       }
-      Log | ProfileEvents | Totals | Extremes => {
+      Log | ProfileEvents => {
         ignore(read_string(self.conn.tcp))
         ignore(read_block(self.conn.tcp))
+      }
+      Totals | Extremes => {
+        ignore(read_string(self.conn.tcp))
+        ignore(read_data_block(self.conn.tcp, self.conn.compress))
       }
       Pong | Hello => ()
     }
@@ -111,7 +120,7 @@ pub async fn NativeResultSetCursor::next(
     match ServerPacket::from_int(ptype.to_int()) {
       Data => {
         ignore(read_string(self.conn.tcp)) // 表名
-        let block = read_block(self.conn.tcp)
+        let block = read_data_block(self.conn.tcp, self.conn.compress)
         if block.headers.length() == 0 {
           continue // 空块
         }
@@ -144,9 +153,13 @@ pub async fn NativeResultSetCursor::next(
         ignore(read_varuint(self.conn.tcp))
         ignore(reader_byte(self.conn.tcp))
       }
-      Log | ProfileEvents | Totals | Extremes => {
+      Log | ProfileEvents => {
         ignore(read_string(self.conn.tcp))
         ignore(read_block(self.conn.tcp))
+      }
+      Totals | Extremes => {
+        ignore(read_string(self.conn.tcp))
+        ignore(read_data_block(self.conn.tcp, self.conn.compress))
       }
       Pong | Hello => ()
     }
@@ -176,7 +189,7 @@ pub async fn NativeResultSetCursor::close(self : NativeResultSetCursor) -> Unit 
       Exception => raise read_exception(self.conn.tcp)
       Data => {
         ignore(read_string(self.conn.tcp))
-        ignore(read_block(self.conn.tcp))
+        ignore(read_data_block(self.conn.tcp, self.conn.compress))
       }
       TableColumns => {
         ignore(read_string(self.conn.tcp))
@@ -194,9 +207,13 @@ pub async fn NativeResultSetCursor::close(self : NativeResultSetCursor) -> Unit 
         ignore(read_varuint(self.conn.tcp))
         ignore(reader_byte(self.conn.tcp))
       }
-      Log | ProfileEvents | Totals | Extremes => {
+      Log | ProfileEvents => {
         ignore(read_string(self.conn.tcp))
         ignore(read_block(self.conn.tcp))
+      }
+      Totals | Extremes => {
+        ignore(read_string(self.conn.tcp))
+        ignore(read_data_block(self.conn.tcp, self.conn.compress))
       }
       Pong | Hello => ()
     }

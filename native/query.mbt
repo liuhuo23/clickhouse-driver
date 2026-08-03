@@ -5,6 +5,7 @@
 fn build_query_packet(
   client_name : String,
   sql : String,
+  compress? : Bool = false,
   params? : Map[String, String] = Map([]),
 ) -> Bytes {
   let buf = Buffer::Buffer()
@@ -40,7 +41,7 @@ fn build_query_packet(
   // --- interserver_secret (rev >= 54441) ---
   write_string(buf, "")
   write_varuint(buf, 2) // stage: Complete
-  write_varuint(buf, 0) // compression: off
+  write_varuint(buf, if compress { 1 } else { 0 }) // compression
   write_string(buf, sql)
   // --- params（settings 字符串表格式, rev >= 54459）---
   write_params(buf, params)
@@ -49,17 +50,30 @@ fn build_query_packet(
 
 ///|
 /// 构造空 Data 块（声明无外部表数据，Query 包后必须发送）。
-fn build_empty_data_packet() -> Bytes {
+fn build_empty_data_packet(compress : Bool) -> Bytes {
   let buf = Buffer::Buffer()
   write_varuint(buf, ClientPacket::Data.to_int().to_uint64())
-  write_string(buf, "") // table name
-  write_varuint(buf, 1) // BlockInfo: field 1
-  buf.write_byte(0) // is_overflows = false
-  write_varuint(buf, 2) // BlockInfo: field 2
-  write_int32(buf, -1) // bucket_num = -1
-  write_varuint(buf, 0) // BlockInfo: end
-  write_varuint(buf, 0) // ncols = 0
-  write_varuint(buf, 0) // nrows = 0
+  write_string(buf, "") // table name（明文）
+  if compress {
+    // block 内容压缩（BlockInfo + ncols + nrows）
+    let payload = Buffer::Buffer()
+    write_varuint(payload, 1)
+    payload.write_byte(0)
+    write_varuint(payload, 2)
+    write_int32(payload, -1)
+    write_varuint(payload, 0)
+    write_varuint(payload, 0)
+    write_varuint(payload, 0)
+    write_compressed_block(buf, payload.to_bytes())
+  } else {
+    write_varuint(buf, 1) // BlockInfo: field 1
+    buf.write_byte(0) // is_overflows = false
+    write_varuint(buf, 2) // BlockInfo: field 2
+    write_int32(buf, -1) // bucket_num = -1
+    write_varuint(buf, 0) // BlockInfo: end
+    write_varuint(buf, 0) // ncols = 0
+    write_varuint(buf, 0) // nrows = 0
+  }
   buf.to_bytes()
 }
 
@@ -76,9 +90,14 @@ pub async fn NativeConnection::execute_query(
 ) -> @lib.ResultSet {
   flush_bytes(
     self.tcp,
-    build_query_packet(self.config.client_name, sql, params~),
+    build_query_packet(
+      self.config.client_name,
+      sql,
+      compress=self.compress,
+      params~,
+    ),
   )
-  flush_bytes(self.tcp, build_empty_data_packet())
+  flush_bytes(self.tcp, build_empty_data_packet(self.compress))
   let columns : Array[@lib.Column] = []
   let rows : Array[@lib.Row] = []
   while true {
@@ -86,7 +105,7 @@ pub async fn NativeConnection::execute_query(
     match ServerPacket::from_int(ptype.to_int()) {
       Data => {
         ignore(read_string(self.tcp)) // 表名（基础版本忽略）
-        let block = read_block(self.tcp)
+        let block = read_data_block(self.tcp, self.compress)
         append_block(columns, rows, block)
       }
       Progress =>
@@ -105,9 +124,13 @@ pub async fn NativeConnection::execute_query(
         ignore(read_varuint(self.tcp))
         ignore(reader_byte(self.tcp))
       }
-      ProfileEvents | Log | Totals | Extremes => {
+      ProfileEvents | Log => {
         ignore(read_string(self.tcp)) // 表名/tag
-        ignore(read_block(self.tcp)) // 数据块（丢弃）
+        ignore(read_block(self.tcp)) // 明文数据块（丢弃）
+      }
+      Totals | Extremes => {
+        ignore(read_string(self.tcp)) // 表名
+        ignore(read_data_block(self.tcp, self.compress)) // 压缩数据块（丢弃）
       }
       TableColumns => {
         // 表结构描述（multistring），查询响应中通常不出现，安全跳过
