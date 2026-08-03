@@ -114,10 +114,11 @@ sub-package. It speaks the same binary protocol as `clickhouse-client`:
 Current capabilities: connect + handshake, `ping`, `execute_query` /
 `execute` (named `{name: Type}` and positional `?` parameter binding),
 `execute_stream` (lazy block-by-block cursor), `insert` (batch Data-block
-upload) and `cancel`, with base column types (UInt8–64, Int8–64, Float32/64,
-String, Date, Date32, DateTime, DateTime64, FixedString, Enum8/16, Nullable),
-server exception mapping, and graceful close. Compression and TLS are planned
-for later stages.
+upload) and `cancel`, with rich type support: UInt8–64, Int8–64, Float32/64,
+String, FixedString, Date, Date32, DateTime, DateTime64, Enum8/16, Nullable,
+Array (nested), Tuple, Map, Decimal32/64/128/256, UUID, IPv4, IPv6 (and
+LowCardinality via server-side unwrapping), server exception mapping, and
+graceful close. Compression and TLS are planned for later stages.
 
 ### Quick start
 

@@ -122,9 +122,10 @@ async fn main {
 
 当前能力：连接 + 握手、`ping`、`execute_query` / `execute`（命名 `{name: Type}`
 与位置 `?` 参数绑定）、`execute_stream`（惰性逐块游标）、`insert`（批量 Data
-块上传）与 `cancel`，覆盖 UInt8–64、Int8–64、Float32/64、String、Date、Date32、
-DateTime、DateTime64、FixedString、Enum8/16、Nullable 等基础类型；服务器异常
-映射、优雅关闭。压缩与 TLS 列入后续阶段。
+块上传）与 `cancel`，类型支持丰富：UInt8–64、Int8–64、Float32/64、String、
+FixedString、Date、Date32、DateTime、DateTime64、Enum8/16、Nullable、Array
+（可嵌套）、Tuple、Map、Decimal32/64/128/256、UUID、IPv4、IPv6（LowCardinality
+由服务器端解包）；服务器异常映射、优雅关闭。压缩与 TLS 列入后续阶段。
 
 ### 快速开始
 
