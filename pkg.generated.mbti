@@ -6,6 +6,10 @@ import {
 }
 
 // Values
+pub fn apply_default_types(String) -> String
+
+pub fn bind_positional(String, Array[String]) -> (String, Map[String, String])
+
 pub fn connect(host~ : String, port~ : Int, user~ : String, password~ : String, database~ : String, client_name~ : String, timeout_ms? : Int, https? : Bool, skip_verify? : Bool, compress? : Bool) -> Connection
 
 // Errors
@@ -13,12 +17,15 @@ pub suberror DbError {
   ServerError(code~ : Int, name~ : String, message~ : String)
   ConnectionError(String)
 } derive(@debug.Debug)
+pub fn DbError::connection_error(String) -> Self
+pub fn DbError::server_error(code~ : Int, name~ : String, message~ : String) -> Self
 
 // Types and methods
 pub struct Column {
   name : String
   type_ : String
 }
+pub fn Column::new(name~ : String, type_~ : String) -> Self
 
 pub struct Connection {
   host : String
@@ -62,6 +69,7 @@ pub struct ResultSet {
   columns : Array[Column]
   rows : Array[Row]
 }
+pub fn ResultSet::new(columns~ : Array[Column], rows~ : Array[Row]) -> Self
 pub fn ResultSet::to_map(Self) -> Array[Map[String, String]]
 
 pub struct ResultSetCursor {
@@ -74,6 +82,7 @@ pub async fn ResultSetCursor::next(Self) -> Row?
 pub struct Row {
   values : Array[String]
 }
+pub fn Row::new(values~ : Array[String]) -> Self
 
 // Type aliases
 

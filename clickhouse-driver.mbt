@@ -541,6 +541,22 @@ pub suberror DbError {
   ConnectionError(String)
 } derive(Debug)
 
+///|
+/// 构造服务器错误（供 native 等子包复用）。
+pub fn DbError::server_error(
+  code~ : Int,
+  name~ : String,
+  message~ : String,
+) -> DbError {
+  ServerError(code~, name~, message~)
+}
+
+///|
+/// 构造连接错误（供 native 等子包复用）。
+pub fn DbError::connection_error(message : String) -> DbError {
+  ConnectionError(message)
+}
+
 // ============ Connection ============
 
 ///|
@@ -933,7 +949,7 @@ async fn Connection::execute_stream_impl(
 /// `param_<name>=<value>` map from the positional `values` array. The
 /// `__p` prefix keeps these synthetic names out of any user-defined
 /// parameter namespace.
-fn bind_positional(
+pub fn bind_positional(
   sql : String,
   values : Array[String],
 ) -> (String, Map[String, String]) {
@@ -975,7 +991,7 @@ fn bind_positional(
 /// and `}}` as a single `}`, so `{{name}}` round-trips to literal
 /// `{name}` in the final SQL instead of being misread as an untyped
 /// placeholder. Unmatched `{` (no closing `}`) is copied verbatim.
-fn apply_default_types(sql : String) -> String {
+pub fn apply_default_types(sql : String) -> String {
   let bytes = @utf8.encode(sql)
   let buf = Buffer::Buffer(size_hint=bytes.length() * 2)
   let mut i = 0
@@ -1575,4 +1591,27 @@ fn substr(s : String, start : Int, end : Int) -> String {
     buf.write_byte(s[i].to_int().to_byte())
   }
   @utf8.decode_lossy(buf.to_bytes())
+}
+
+// ============ Result set constructors (for sub-packages) ============
+
+///|
+/// 构造列元数据（供 native 等子包复用）。
+pub fn Column::new(name~ : String, type_~ : String) -> Column {
+  { name, type_ }
+}
+
+///|
+/// 构造单行结果（供 native 等子包复用）。
+pub fn Row::new(values~ : Array[String]) -> Row {
+  { values, }
+}
+
+///|
+/// 构造完整结果集（供 native 等子包复用）。
+pub fn ResultSet::new(
+  columns~ : Array[Column],
+  rows~ : Array[Row],
+) -> ResultSet {
+  { columns, rows }
 }
