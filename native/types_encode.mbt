@@ -75,6 +75,10 @@ fn write_value(buf : Buffer, type_name : String, value : String) -> Unit raise {
     "Float32" => write_float32(buf, parse_float_value(value).to_float())
     "Float64" => write_float64(buf, parse_float_value(value))
     "String" => write_string(buf, value)
+    "Bool" =>
+      buf.write_byte(if value == "true" || value == "1" { 1 } else { 0 })
+    _ if type_name.has_prefix("Interval") =>
+      write_int64(buf, parse_int64_value(value))
     _ =>
       raise @lib.DbError::connection_error(
         "unsupported type for insert: \{type_name}",

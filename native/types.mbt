@@ -30,11 +30,13 @@ async fn[R : @io.Reader] read_value(reader : R, type_name : String) -> String {
   if type_name.has_prefix("DateTime64(") {
     let scale = parse_type_param(type_name, "(")
     let v = read_int64(reader)
-    return format_datetime64(v, scale)
+    let offset = timezone_offset(type_name)
+    return format_datetime64_offset(v, scale, offset)
   }
   if type_name == "DateTime" || type_name.has_prefix("DateTime(") {
     let v = read_uint32(reader)
-    return format_datetime(v.to_int64())
+    let offset = timezone_offset(type_name)
+    return format_datetime(v.to_int64() + offset.to_int64() * 60)
   }
   if type_name == "Date32" {
     let v = read_int32(reader)
@@ -71,9 +73,16 @@ async fn[R : @io.Reader] read_value(reader : R, type_name : String) -> String {
     "Float64" => read_float64(reader).to_string()
     "String" => read_string(reader)
     "Nothing" => ""
+    "Bool" =>
+      if reader.read_exactly(1)[0].to_uint() == 0 {
+        "false"
+      } else {
+        "true"
+      }
     _ if type_name.has_prefix("Enum8(") => read_enum_value(reader, type_name, 1)
     _ if type_name.has_prefix("Enum16(") =>
       read_enum_value(reader, type_name, 2)
+    _ if type_name.has_prefix("Interval") => read_int64(reader).to_string()
     _ => raise @lib.DbError::connection_error("unsupported type: \{type_name}")
   }
 }
@@ -637,4 +646,123 @@ fn format_datetime64(v : Int64, scale : Int) -> String {
     return format_datetime(seconds - 1L) + "." + pad_int(frac + pow, scale)
   }
   format_datetime(seconds) + "." + pad_int(frac, scale)
+}
+
+///|
+/// 解析类型名中的时区（`DateTime('Asia/Shanghai')` / `DateTime64(3, 'Asia/Shanghai')`），
+/// 返回相对 UTC 的偏移（分钟）。未知时区按 0（UTC），文档注明 DST 用标准偏移近似。
+fn timezone_offset(type_name : String) -> Int {
+  // 时区以单引号包裹（可能是 DateTime('tz') 或 DateTime64(3, 'tz')）；
+  // 取最后一对引号内的内容
+  let mut end = -1
+  let mut i = type_name.length() - 1
+  while i >= 0 {
+    if type_name[i] == '\'' {
+      end = i
+      break
+    }
+    i = i - 1
+  }
+  if end < 0 {
+    return 0
+  }
+  let mut start = -1
+  let mut i = end - 1
+  while i >= 0 {
+    if type_name[i] == '\'' {
+      start = i
+      break
+    }
+    i = i - 1
+  }
+  if start < 0 {
+    return 0
+  }
+  let tz = type_name[start + 1:end].to_string()
+  // Etc/GMT±N 直接解析
+  if tz.has_prefix("Etc/GMT") || tz == "GMT" {
+    let rest = if tz == "GMT" { "" } else { tz[7:].to_string() }
+    if rest == "" {
+      return 0
+    }
+    // Etc/GMT 符号约定反转：Etc/GMT-3 表示 UTC+3
+    let sign = if rest.has_prefix("-") { 1 } else { -1 }
+    let num_s = if rest.has_prefix("-") || rest.has_prefix("+") {
+      rest[1:].to_string()
+    } else {
+      rest
+    }
+    let hours = @string.parse_int(num_s) catch { _ => 0 }
+    return sign * hours * 60
+  }
+  match tz {
+    "UTC" | "Etc/Universal" | "Etc/Zulu" => 0
+    "Asia/Shanghai"
+    | "Asia/Hong_Kong"
+    | "Asia/Singapore"
+    | "Asia/Manila"
+    | "Asia/Taipei"
+    | "Asia/Macau" => 480
+    "Asia/Tokyo" | "Asia/Seoul" => 540
+    "Asia/Kolkata" | "Asia/Calcutta" => 330
+    "Asia/Kathmandu" => 345
+    "Asia/Dubai" => 240
+    "Asia/Bangkok" | "Asia/Jakarta" | "Asia/Ho_Chi_Minh" => 420
+    "Asia/Tel_Aviv" => 120
+    "Europe/London" | "Europe/Dublin" | "Europe/Lisbon" => 0
+    "Europe/Berlin"
+    | "Europe/Paris"
+    | "Europe/Madrid"
+    | "Europe/Rome"
+    | "Europe/Amsterdam"
+    | "Europe/Prague"
+    | "Europe/Warsaw"
+    | "Europe/Vienna"
+    | "Europe/Brussels"
+    | "Europe/Zurich"
+    | "Europe/Stockholm" => 60
+    "Europe/Athens"
+    | "Europe/Helsinki"
+    | "Europe/Bucharest"
+    | "Europe/Sofia"
+    | "Europe/Kyiv"
+    | "Europe/Istanbul" => 120
+    "Europe/Moscow" | "Europe/Minsk" => 180
+    "America/New_York" | "America/Toronto" | "America/Montreal" => -300
+    "America/Chicago" => -360
+    "America/Denver" | "America/Phoenix" => -420
+    "America/Los_Angeles" | "America/Vancouver" | "America/Tijuana" => -480
+    "America/Anchorage" => -540
+    "America/Sao_Paulo" | "America/Argentina/Buenos_Aires" => -180
+    "America/Mexico_City" => -360
+    "America/Halifax" => -240
+    "Australia/Sydney" | "Australia/Melbourne" | "Australia/Brisbane" => 600
+    "Australia/Perth" => 480
+    "Australia/Adelaide" => 570
+    "Pacific/Auckland" => 720
+    "Pacific/Honolulu" => -600
+    _ => 0 // 未知时区按 UTC（文档说明）
+  }
+}
+
+///|
+/// 带时区偏移的 DateTime64 格式化。
+fn format_datetime64_offset(v : Int64, scale : Int, offset_min : Int) -> String {
+  let offset_sec = offset_min.to_int64() * 60
+  if scale <= 0 {
+    return format_datetime(v + offset_sec)
+  }
+  let mut pow : Int64 = 1L
+  for _ in 0..<scale {
+    pow = pow * 10L
+  }
+  let seconds = v / pow
+  let frac = v % pow
+  if frac < 0L {
+    format_datetime(seconds - 1L + offset_sec) +
+    "." +
+    pad_int(frac + pow, scale)
+  } else {
+    format_datetime(seconds + offset_sec) + "." + pad_int(frac, scale)
+  }
 }
