@@ -108,6 +108,71 @@ async fn main {
 }
 ```
 
+## 原生协议（TCP）驱动
+
+除 HTTP 接口外，本项目还附带一个实验性的 **ClickHouse 原生 TCP 协议**
+驱动（端口 **9000**），位于 `native/` 子包，与 `clickhouse-client` 使用
+相同的二进制协议：
+
+- **持久连接**：一次握手、多次查询复用同一 TCP 连接（天然适合 keep-alive
+  复用与连接池）。
+- **二进制传输**：无文本往返开销，值按原生列编码解码，类型信息精确。
+- **API 对齐**：复用根包的 `DbError` / `ResultSet` / `Column` / `Row` 类型，
+  调用方迁移成本极低。
+
+当前能力：连接 + 握手、`ping`、`execute_query` / `execute`（命名 `{name: Type}`
+与位置 `?` 参数绑定）、`execute_stream`（惰性逐块游标）、`insert`（批量 Data
+块上传）与 `cancel`，覆盖 UInt8–64、Int8–64、Float32/64、String、Date、Date32、
+DateTime、DateTime64、FixedString、Enum8/16、Nullable 等基础类型；服务器异常
+映射、优雅关闭。压缩与 TLS 列入后续阶段。
+
+### 快速开始
+
+```moonbit nocheck
+///|
+async fn main {
+  let conn = @native.connect(
+    @native.native_config(
+      host="127.0.0.1",
+      port=9000,
+      user="default",
+      password="",
+      database="default",
+      client_name="my-app",
+    ),
+  )
+  defer conn.close()
+
+  conn.ping()
+
+  let rs = conn.execute_query("SELECT 1 AS one")
+  println(rs.rows[0].values[0]) // 1
+}
+```
+
+在 `moon.pkg` 中引入子包：
+
+```text
+import {
+  "liuhuo23/clickhouse-driver/native" @native,
+}
+```
+
+### 与 HTTP 版的差异
+
+- `@native.connect(config)` **真实建连**（含握手）；HTTP 版的 `connect`
+  只是纯配置。
+- 单连接串行执行查询——不要在同一个 `NativeConnection` 上并发读取。
+- 错误语义一致：认证/语法错误抛 `DbError::ServerError(code, name, message)`；
+  IO 与协议错误抛 `DbError::ConnectionError`。
+
+### 示例
+
+```bash
+CLICKHOUSE_NATIVE=1 CLICKHOUSE_NATIVE_PORT=9000 moon run cmd/main
+```
+
+完整设计与分阶段实施计划（P0–P4）见 `docs/native-protocol-design.md`。
 ## API 参考
 
 ### `connect`

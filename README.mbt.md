@@ -98,6 +98,77 @@ async fn main {
 }
 ```
 
+## Native protocol (TCP) driver
+
+In addition to the HTTP interface, this project ships an experimental
+**ClickHouse native TCP protocol** driver (port **9000**) in the `native/`
+sub-package. It speaks the same binary protocol as `clickhouse-client`:
+
+- **Persistent connection**: one handshake, then many queries over the same
+  TCP socket (a natural fit for keep-alive reuse and connection pooling).
+- **Binary transport**: no text round-trip; values are decoded from their
+  native column encodings, so types stay exact.
+- **Aligned API**: reuses the root package's `DbError` / `ResultSet` /
+  `Column` / `Row` types, so migrating call sites is trivial.
+
+Current capabilities: connect + handshake, `ping`, `execute_query` /
+`execute` (named `{name: Type}` and positional `?` parameter binding),
+`execute_stream` (lazy block-by-block cursor), `insert` (batch Data-block
+upload) and `cancel`, with base column types (UInt8–64, Int8–64, Float32/64,
+String, Date, Date32, DateTime, DateTime64, FixedString, Enum8/16, Nullable),
+server exception mapping, and graceful close. Compression and TLS are planned
+for later stages.
+
+### Quick start
+
+```moonbit nocheck
+///|
+async fn main {
+  let conn = @native.connect(
+    @native.native_config(
+      host="127.0.0.1",
+      port=9000,
+      user="default",
+      password="",
+      database="default",
+      client_name="my-app",
+    ),
+  )
+  defer conn.close()
+
+  conn.ping()
+
+  let rs = conn.execute_query("SELECT 1 AS one")
+  println(rs.rows[0].values[0]) // 1
+}
+```
+
+To use it, import the sub-package in your `moon.pkg`:
+
+```text
+import {
+  "liuhuo23/clickhouse-driver/native" @native,
+}
+```
+
+### Differences from the HTTP driver
+
+- `@native.connect(config)` **actually connects** (handshake included); the
+  HTTP `connect` is config-only.
+- One connection executes queries serially — do not run concurrent reads on
+  the same `NativeConnection`.
+- Errors use the same `DbError`: auth / syntax failures raise
+  `DbError::ServerError(code, name, message)`; I/O and protocol problems raise
+  `DbError::ConnectionError`.
+
+### Demo
+
+```bash
+CLICKHOUSE_NATIVE=1 CLICKHOUSE_NATIVE_PORT=9000 moon run cmd/main
+```
+
+See `docs/native-protocol-design.md` for the full design and the staged
+implementation plan (P0–P4).
 ## API reference
 
 ### `connect`
