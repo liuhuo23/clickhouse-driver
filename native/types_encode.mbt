@@ -17,6 +17,25 @@ fn write_value(buf : Buffer, type_name : String, value : String) -> Unit raise {
   if type_name.has_prefix("FixedString(") {
     return write_fixed_string(buf, type_name, value)
   }
+  if type_name.has_prefix("Decimal(") {
+    return write_decimal(buf, type_name, value)
+  }
+  if type_name.has_prefix("UUID") {
+    return write_uuid_value(buf, value)
+  }
+  if type_name == "IPv4" {
+    return write_ipv4(buf, value)
+  }
+  match type_name {
+    "Enum8" => ()
+    _ => ()
+  }
+  if type_name.has_prefix("Enum8(") {
+    return write_enum(buf, type_name, value, 1)
+  }
+  if type_name.has_prefix("Enum16(") {
+    return write_enum(buf, type_name, value, 2)
+  }
   match type_name {
     "UInt8" => {
       let v = parse_uint_value(value, "UInt8")
@@ -228,7 +247,7 @@ fn write_datetime64(
   type_name : String,
   value : String,
 ) -> Unit raise {
-  let scale = parse_type_size(type_name, 12)
+  let scale = parse_type_param(type_name, "(")
   let dot = value.find(".")
   let (main, frac) = match dot {
     Some(i) => (value[:i].to_string(), value[i + 1:].to_string())
@@ -355,4 +374,178 @@ fn write_fixed_string(
   for _ in bytes.length()..<n {
     buf.write_byte(0)
   }
+}
+
+///|
+/// Decimal 写入：解析 `"123.456"`（按 scale 缩放为整数）→ 定长小端。
+fn write_decimal(
+  buf : Buffer,
+  type_name : String,
+  value : String,
+) -> Unit raise {
+  let open = type_name.find("(").or(0)
+  let comma = type_name.find(",").or(type_name.length() - 1)
+  let prec = parse_int_inner(type_name[open + 1:comma].trim().to_string())
+  let scale = parse_int_inner(
+    type_name[comma + 1:type_name.length() - 1].trim().to_string(),
+  )
+  let big = parse_decimal_string(value, scale)
+  if prec <= 9 {
+    write_int32(buf, big.to_int())
+  } else if prec <= 18 {
+    write_int64(buf, big.to_int64())
+  } else if prec <= 38 {
+    write_big_le(buf, big, 16)
+  } else {
+    write_big_le(buf, big, 32)
+  }
+}
+
+///|
+/// 解析十进制字符串为缩放后的 BigInt。
+fn parse_decimal_string(value : String, scale : Int) -> @bigint.BigInt raise {
+  let neg = value.has_prefix("-")
+  let s = if neg { value[1:].to_string() } else { value }
+  let (int_s, frac_s) = match s.find(".") {
+    Some(i) => (s[:i].to_string(), s[i + 1:].to_string())
+    None => (s, "")
+  }
+  let mut frac = frac_s
+  while frac.length() < scale {
+    frac = frac + "0"
+  }
+  if frac.length() > scale {
+    frac = frac[:scale].to_string()
+  }
+  let digits = int_s + frac
+  let big = @bigint.BigInt::from_string(digits) catch {
+    _ => raise @lib.DbError::connection_error("invalid Decimal value: \{value}")
+  }
+  if neg {
+    -big
+  } else {
+    big
+  }
+}
+
+///|
+/// 写 BigInt 的小端字节（补码，固定长度）。
+fn write_big_le(buf : Buffer, big : @bigint.BigInt, nbytes : Int) -> Unit raise {
+  let zero = @bigint.BigInt::from_int(0)
+  let modulus = @bigint.BigInt::from_int(1) << (nbytes * 8)
+  let v = if big < zero { modulus + big } else { big }
+  let be = v.to_octets(length=nbytes)
+  let mut i = nbytes - 1
+  while i >= 0 {
+    buf.write_byte(be[i])
+    i = i - 1
+  }
+}
+
+///|
+/// UUID 写入：解析 `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` → 16 字节
+/// （先高 64 位小端、再低 64 位小端）。
+fn write_uuid_value(buf : Buffer, value : String) -> Unit raise {
+  let parts = value.split("-").to_array()
+  if parts.length() != 5 {
+    raise @lib.DbError::connection_error("invalid UUID: \{value}")
+  }
+  let hi_s = parts[0].to_string() + parts[1].to_string() + parts[2].to_string()
+  let lo_s = parts[3].to_string() + parts[4].to_string()
+  let hi = parse_hex64(hi_s)
+  let lo = parse_hex64(lo_s)
+  // 高 64 位小端
+  write_uint64(buf, hi)
+  // 低 64 位小端
+  write_uint64(buf, lo)
+}
+
+///|
+/// 解析 16 位 hex 字符串为 UInt64。
+fn parse_hex64(s : String) -> UInt64 raise {
+  if s.length() != 16 {
+    raise @lib.DbError::connection_error("invalid UUID hex: \{s}")
+  }
+  let mut v : UInt64 = 0
+  for ch in s {
+    let c = ch.to_int()
+    let d = if c >= '0'.to_int() && c <= '9'.to_int() {
+      c - '0'.to_int()
+    } else if c >= 'a'.to_int() && c <= 'f'.to_int() {
+      c - 'a'.to_int() + 10
+    } else if c >= 'A'.to_int() && c <= 'F'.to_int() {
+      c - 'A'.to_int() + 10
+    } else {
+      raise @lib.DbError::connection_error("invalid UUID hex: \{s}")
+    }
+    v = (v << 4) | d.to_uint64()
+  }
+  v
+}
+
+///|
+/// IPv4 写入：`a.b.c.d` → UInt32 小端。
+fn write_ipv4(buf : Buffer, value : String) -> Unit raise {
+  let parts = value.split(".").to_array()
+  if parts.length() != 4 {
+    raise @lib.DbError::connection_error("invalid IPv4: \{value}")
+  }
+  let bytes : Array[Byte] = Array::make(4, 0)
+  for i in 0..<4 {
+    let n = parse_int_strict(parts[i].trim(), "IPv4 octet")
+    if n < 0 || n > 255 {
+      raise @lib.DbError::connection_error("invalid IPv4 octet: \{value}")
+    }
+    bytes[i] = n.to_byte()
+  }
+  // UInt32 小端：a.b.c.d → 0xddccbbaa 的小端字节 = aa bb cc dd
+  buf.write_byte(bytes[3])
+  buf.write_byte(bytes[2])
+  buf.write_byte(bytes[1])
+  buf.write_byte(bytes[0])
+}
+
+///|
+/// Enum 写入：名称或数字 → Int8/Int16 值。
+fn write_enum(
+  buf : Buffer,
+  type_name : String,
+  value : String,
+  byte_width : Int,
+) -> Unit raise {
+  let raw = enum_name_to_value(type_name, value)
+  if raw == 0 && value != "0" && value != "0.0" {
+    // 不是已知名称，尝试解析为数字
+    if byte_width == 1 {
+      let n = parse_int_value(value, "Enum8")
+      if n < -128 || n > 127 {
+        raise @lib.DbError::connection_error("Enum8 out of range: \{value}")
+      }
+      buf.write_byte(n.to_byte())
+      return
+    }
+    let n = parse_int_value(value, "Enum16")
+    if n < -32768 || n > 32767 {
+      raise @lib.DbError::connection_error("Enum16 out of range: \{value}")
+    }
+    write_uint16(buf, n.reinterpret_as_uint().to_uint16())
+    return
+  }
+  if byte_width == 1 {
+    buf.write_byte(raw.to_byte())
+  } else {
+    write_uint16(buf, raw.reinterpret_as_uint().to_uint16())
+  }
+}
+
+///|
+/// 查 Enum 映射：名称 → 数值。
+fn enum_name_to_value(type_name : String, name : String) -> Int {
+  let map = parse_enum_map(type_name)
+  for entry in map {
+    if entry.1 == name {
+      return entry.0
+    }
+  }
+  0
 }
