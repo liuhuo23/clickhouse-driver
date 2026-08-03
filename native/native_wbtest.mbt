@@ -261,7 +261,7 @@ test "datetime formatting" {
 
 ///|
 test "query packet structure" {
-  let bytes = build_query_packet("tester", "SELECT 1")
+  let bytes = build_query_packet("tester", "SELECT 1", compress=false)
   let (ptype, pos1) = decode_varuint(bytes, 0)
   assert_eq(ptype, 1) // Query
   let (qid, pos2) = decode_string(bytes, pos1)
@@ -328,7 +328,7 @@ test "query packet structure" {
 
 ///|
 test "empty data packet structure" {
-  let bytes = build_empty_data_packet()
+  let bytes = build_empty_data_packet(false)
   let (ptype, pos1) = decode_varuint(bytes, 0)
   assert_eq(ptype, 2) // Data
   let (table, pos2) = decode_string(bytes, pos1)
@@ -611,7 +611,7 @@ test "build_insert_sql and data packet" {
     { name: "a", type_: "Int32" },
     { name: "b", type_: "String" },
   ]
-  let pkt = build_data_packet(headers, [["1", "x"], ["2", "yy"]])
+  let pkt = build_data_packet(headers, [["1", "x"], ["2", "yy"]], false)
   // 包类型 2
   let (ptype, pos1) = decode_varuint(pkt, 0)
   assert_eq(ptype, 2)
@@ -668,6 +668,7 @@ test "query packet params encoding" {
   let bytes = build_query_packet(
     "t",
     "SELECT {n: UInt32}",
+    compress=false,
     params=Map::from_array([("n", "42")]),
   )
   // 定位到 SQL 之后（结构见 "query packet structure" 测试）
@@ -937,3 +938,151 @@ test "timezone offset parsing" {
   assert_eq(timezone_offset("DateTime('America/New_York')"), -300)
   assert_eq(timezone_offset("DateTime('Asia/Tokyo')"), 540)
 }
+
+///|
+test "lz4 decompress samples" {
+  // 样本来自 Python lz4.block.compress（与 ClickHouse LZ4_compress_default 同格式）
+  let cases : Array[(Bytes, Bytes, Int)] = [
+    (b"\x68\x65\x6c\x6c\x6f\x20\x77\x6f\x72\x6c\x64", b"hello world", 0),
+  ]
+  let d1 = lz4_decompress(
+    b"\xb0\x68\x65\x6c\x6c\x6f\x20\x77\x6f\x72\x6c\x64", 11,
+  )
+  assert_eq(d1, b"hello world")
+  // abc×100
+  let repeated = lz4_decompress(
+    b"\x3f\x61\x62\x63\x03\x00\xff\x12\x50\x62\x63\x61\x62\x63", 300,
+  )
+  assert_eq(repeated.length(), 300)
+  assert_eq(repeated[0], b'a')
+  assert_eq(repeated[299], b'c')
+  // 纯字面量
+  let lit = lz4_decompress(b"\x10\x78", 1)
+  assert_eq(lit, b"x")
+  // 空
+  let empty = lz4_decompress(b"\x00", 0)
+  assert_eq(empty.length(), 0)
+}
+
+///|
+async test "read compressed payload" {
+  let reader = @io.MemoryReader::MemoryReader(fn(writer) {
+    // 构造 C++ 格式压缩块：16B checksum(0) + comp_size + uncomp_size + 0x82 + LZ4
+    let buf = Buffer::Buffer()
+    for _ in 0..<16 {
+      buf.write_byte(0)
+    }
+    let payload = b"\xb0\x68\x65\x6c\x6c\x6f\x20\x77\x6f\x72\x6c\x64" // LZ4("hello world")
+    buf.write_byte(0x82) // method: LZ4
+    write_uint32(buf, (9 + payload.length()).to_uint()) // comp_size
+    write_uint32(buf, 11) // uncomp_size
+    buf.write_bytes(payload)
+    flush_bytes(writer, buf.to_bytes())
+  })
+  let out = read_payload(reader, true)
+  reader.close()
+  assert_eq(out, b"hello world")
+}
+
+///|
+async test "read uncompressed payload when compression off" {
+  let reader = @io.MemoryReader::MemoryReader(fn(writer) {
+    let buf = Buffer::Buffer()
+    write_string(buf, "plain data")
+    flush_bytes(writer, buf.to_bytes())
+  })
+  let out = read_payload(reader, false)
+  reader.close()
+  assert_eq(out, b"plain data")
+}
+
+///|
+test "cityhash128 vectors" {
+  // 与 clickhouse_cityhash（ClickHouse CityHash_v1_0_2）对照。
+  // 注意：Python int 的低 64 位 = C++ high64，高 64 位 = C++ low64；
+  // city_hash128 返回 (C++ low64, C++ high64)，写入时 low64 在前。
+  let cases : Array[(Bytes, UInt64, UInt64)] = [
+    (b"", 0x3df09dfc64c09a2b, 0x3cb540c392e51e29),
+    (b"a", 0xd27139a1afe01ad0, 0xfd7e8ee2e4c86cf6),
+    (b"hello world", 0x7dfb52dd24b29c7b, 0x0f6075c357e384d0),
+    (
+      b"The quick brown fox jumps over the lazy dog", 0x69102202d326a2fd, 0xe4b1346bbee531a1,
+    ),
+    (
+      b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      0xac565824d014f9f2, 0xa6215b222dbf04ac,
+    ),
+  ]
+  for case in cases {
+    let (data, lo, hi) = case
+    let (l, h) = city_hash128(data)
+    assert_eq(l, lo)
+    assert_eq(h, hi)
+  }
+  // 长输入（>= 128 走 with_seed 主路径）
+  let long = Buffer::Buffer()
+  for i in 0..<100 {
+    long.write_bytes(b"data")
+  }
+  let (l2, h2) = city_hash128(long.to_bytes())
+  assert_eq(l2, 0x1592f5c672d377d7)
+  assert_eq(h2, 0x9d9326ed80f02340)
+}
+
+///|
+test "cityhash128 full vector check" {
+  // len 0..39 与 clickhouse_cityhash 对照（C++ low, high）
+  let expected : Array[(Int, UInt64, UInt64)] = [
+    (0, 0x3df09dfc64c09a2b, 0x3cb540c392e51e29),
+    (1, 0xaf63bd6670cfb269, 0x879aef3966e6eed9),
+    (2, 0x440a8a39d76709b0, 0xd404c769f5802b60),
+    (3, 0x1b96c82f088f4a5f, 0x18dea354ffa74abb),
+    (4, 0x34dc29d42325d5c6, 0x5c5406016dfc42b0),
+    (5, 0xdf95b0116f6404b5, 0x338df7cf01add573),
+    (6, 0xdc94c8d354b5826a, 0xcd46939f3945bb92),
+    (7, 0xaef9eb639afacfd1, 0xb9d723bad4edd427),
+    (8, 0xc55f34464082cb38, 0xc72b251dbe7727a3),
+    (9, 0x4ce418cb68eb9a76, 0x71f186a9f6a85efd),
+    (10, 0x2e7038741742c039, 0xe18e330e147e1a2b),
+    (11, 0xc94c8e545a8a5f36, 0x43688e7b89e420b6),
+  ]
+  for case in expected {
+    let (ln, elo, ehi) = case
+    let buf = Buffer::Buffer()
+    for i in 0..<ln {
+      buf.write_byte((65 + i % 26).to_byte())
+    }
+    let (l, h) = city_hash128(buf.to_bytes())
+    assert_eq(l, elo)
+    assert_eq(h, ehi)
+  }
+  // 主路径（len >= 128）
+  let long_cases : Array[(Int, UInt64, UInt64)] = [
+    (128, 0x292f5e1651d7427e, 0x1251bc99ab918911),
+    (129, 0xcc0219ec07506579, 0xff373dc4b7d980ab),
+    (130, 0x1905ef921e7bd5dc, 0x8ea1c8a1ea71c7fa),
+    (200, 0x65a2e22bc96c266e, 0xb1ca79b729fa73d0),
+    (256, 0x0f0988c85c37c622, 0xb5e00e8d1af48470),
+    (400, 0x119a0f277f23d7d5, 0x9cdc3726e06d5ed5),
+  ]
+  for case in long_cases {
+    let (ln, elo, ehi) = case
+    let buf = Buffer::Buffer()
+    for i in 0..<ln {
+      buf.write_byte((65 + i % 26).to_byte())
+    }
+    let (l, h) = city_hash128(buf.to_bytes())
+    assert_eq(l, elo, msg="long \{ln} low")
+    assert_eq(h, ehi, msg="long \{ln} high")
+  }
+  // data*100（400 字节）
+  let dbuf = Buffer::Buffer()
+  for i in 0..<100 {
+    dbuf.write_bytes(b"data")
+  }
+  let (dl, dh) = city_hash128(dbuf.to_bytes())
+  assert_eq(dl, 0x1592f5c672d377d7, msg="data100 low")
+  assert_eq(dh, 0x9d9326ed80f02340, msg="data100 high")
+}
+
+///|

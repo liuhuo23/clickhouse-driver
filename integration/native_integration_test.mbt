@@ -460,3 +460,67 @@ async test "native integration: insert bool and interval" {
   ignore(conn.execute_query("DROP TABLE IF EXISTS native_bi"))
   conn.close()
 }
+
+///|
+async test "native integration: compressed mode" {
+  require_integration()
+  let (host, port) = native_env()
+  let caught = try {
+    let conn = @native.connect(
+      @native.native_config(
+        host~,
+        port~,
+        user="default",
+        password="barn",
+        database="default",
+        compress=true,
+      ),
+    )
+    // 压缩 SELECT
+    let rs = conn.execute_query(
+      "SELECT number AS n, repeat(toString(number), 100) AS s FROM numbers(3)",
+    )
+    assert_eq(rs.rows.length(), 3)
+    assert_eq(rs.rows[0].values[0], "0")
+    assert_eq(rs.rows[1].values[0], "1")
+    // 压缩 INSERT + 读回
+    ignore(conn.execute_query("DROP TABLE IF EXISTS native_comp"))
+    ignore(
+      conn.execute_query(
+        "CREATE TABLE native_comp (id UInt32, s String) ENGINE = Memory",
+      ),
+    )
+    conn.insert("native_comp", ["id", "s"], [["1", "hello"], ["2", "world"]])
+    let rs2 = conn.execute_query("SELECT * FROM native_comp ORDER BY id")
+    assert_eq(rs2.rows[0].values[1], "hello")
+    assert_eq(rs2.rows[1].values[1], "world")
+    ignore(conn.execute_query("DROP TABLE IF EXISTS native_comp"))
+    // 压缩流式游标
+    let cur = conn.execute_stream("SELECT number AS n FROM numbers(5)")
+    let mut count = 0
+    while true {
+      match cur.next() {
+        Some(_) => count = count + 1
+        None => break
+      }
+    }
+    cur.close()
+    assert_eq(count, 5)
+    conn.close()
+    false
+  } catch {
+    @lib.DbError::ServerError(code~, name~, message~) => {
+      println("COMP SERVER \{code}: \{message}")
+      true
+    }
+    @lib.DbError::ConnectionError(msg) => {
+      println("COMP CONN: \{msg}")
+      true
+    }
+    err => {
+      println("COMP OTHER: \{err}")
+      true
+    }
+  }
+  assert_true(not(caught))
+}
