@@ -33,3 +33,7 @@ jobs:
 
       - name: integration tests
         run: moon test integration/ --target native
+
+      - name: Stop ClickHouse
+        if: always()
+        run: docker rm -f clickhouse 2>/dev/null || true

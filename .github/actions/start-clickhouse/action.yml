@@ -28,6 +28,7 @@ runs:
         docker rm -f clickhouse 2>/dev/null || true
         docker run -d --rm --name clickhouse \
           -p ${{ inputs.port }}:8123 \
+          -p 39000:9000 \
           -e CLICKHOUSE_USER=${{ inputs.user }} \
           -e CLICKHOUSE_PASSWORD=${{ inputs.password }} \
           -e CLICKHOUSE_DB=default \
@@ -47,7 +48,3 @@ runs:
         docker logs clickhouse || true
         exit 1
 
-    - name: Stop ClickHouse
-      if: always()
-      shell: bash
-      run: docker rm -f clickhouse 2>/dev/null || true
