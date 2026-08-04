@@ -8,14 +8,14 @@
 
 ///|
 /// 块内列头信息。
-struct ColumnHeader {
+priv struct ColumnHeader {
   name : String
   type_ : String
 }
 
 ///|
 /// 解码结果：列头 + 行优先数据。
-struct BlockData {
+priv struct BlockData {
   headers : Array[ColumnHeader]
   rows : Array[Array[String]]
 }
@@ -79,14 +79,12 @@ async fn[R : @io.Reader] read_data_block(
   reader : R,
   compress : Bool,
 ) -> BlockData {
-  if not(compress) {
+  if !compress {
     // 非压缩：数据块直接是 NativeWriter 格式（BlockInfo + 列头 + 数据）
     return read_block(reader)
   }
   let payload = read_payload(reader, true)
-  let mr = @io.MemoryReader::MemoryReader(fn(writer) {
-    flush_bytes(writer, payload)
-  })
+  let mr = @io.MemoryReader::MemoryReader(writer => flush_bytes(writer, payload))
   let block = read_block(mr)
   mr.close()
   block

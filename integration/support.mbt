@@ -22,3 +22,17 @@ pub fn make_ci_conn(
 pub fn async_runtime_loaded() -> Bool {
   @async.is_being_cancelled()
 }
+
+///|
+/// Marker for native package usage in this package (native integration tests
+/// are the only consumers; this non-test reference keeps the import alive).
+pub fn native_runtime_loaded() -> Bool {
+  let cfg = @native.native_config(
+    host="",
+    port=0,
+    user="",
+    password="",
+    database="",
+  )
+  cfg.host == "" && cfg.port == 0
+}

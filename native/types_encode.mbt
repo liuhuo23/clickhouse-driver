@@ -72,7 +72,8 @@ fn write_value(buf : Buffer, type_name : String, value : String) -> Unit raise {
     }
     "Int32" => write_int32(buf, parse_int_value(value, "Int32"))
     "Int64" => write_int64(buf, parse_int64_value(value))
-    "Float32" => write_float32(buf, parse_float_value(value).to_float())
+    "Float32" =>
+      write_float32(buf, Float::from_double(parse_float_value(value)))
     "Float64" => write_float64(buf, parse_float_value(value))
     "String" => write_string(buf, value)
     "Bool" =>
@@ -94,7 +95,7 @@ fn write_column_values(
   values : Array[String],
 ) -> Unit raise {
   if type_name.has_prefix("Nullable(") {
-    let inner = type_name[9:type_name.length() - 1].to_string()
+    let inner = type_name[9:type_name.length() - 1].to_owned()
     // 阶段 1：整列 null mask（1 = NULL）
     for v in values {
       buf.write_byte(if v == "" { 1 } else { 0 })
@@ -120,7 +121,7 @@ fn write_default_value(buf : Buffer, type_name : String) -> Unit raise {
   if type_name.has_prefix("Nullable(") {
     return write_default_value(
       buf,
-      type_name[9:type_name.length() - 1].to_string(),
+      type_name[9:type_name.length() - 1].to_owned(),
     )
   }
   if type_name.has_prefix("FixedString(") {
@@ -254,7 +255,7 @@ fn write_datetime64(
   let scale = parse_type_param(type_name, "(")
   let dot = value.find(".")
   let (main, frac) = match dot {
-    Some(i) => (value[:i].to_string(), value[i + 1:].to_string())
+    Some(i) => (value[:i].to_owned(), value[i + 1:].to_owned())
     None => (value, "")
   }
   let (y, m, d, hh, mm, ss) = parse_datetime_parts(main)
@@ -310,7 +311,7 @@ fn parse_date_parts(value : String) -> (Int, Int, Int) raise {
 fn parse_datetime_parts(value : String) -> (Int, Int, Int, Int, Int, Int) raise {
   let sp = value.find(" ")
   let (date_s, time_s) = match sp {
-    Some(i) => (value[:i].to_string(), value[i + 1:].to_string())
+    Some(i) => (value[:i].to_owned(), value[i + 1:].to_owned())
     None => (value, "00:00:00")
   }
   let (y, m, d) = parse_date_parts(date_s)
@@ -345,7 +346,7 @@ fn parse_type_size(type_name : String, prefix_len : Int) -> Int raise {
 ///|
 /// 提取 Decimal 精度。
 fn decimal_precision(type_name : String) -> Int raise {
-  let comma = type_name.find(",").or(type_name.length() - 1)
+  let comma = type_name.find(",").unwrap_or(type_name.length() - 1)
   let prec_s = type_name[10:comma].trim()
   parse_int_strict(prec_s, "precision")
 }
@@ -387,11 +388,11 @@ fn write_decimal(
   type_name : String,
   value : String,
 ) -> Unit raise {
-  let open = type_name.find("(").or(0)
-  let comma = type_name.find(",").or(type_name.length() - 1)
-  let prec = parse_int_inner(type_name[open + 1:comma].trim().to_string())
+  let open = type_name.find("(").unwrap_or(0)
+  let comma = type_name.find(",").unwrap_or(type_name.length() - 1)
+  let prec = parse_int_inner(type_name[open + 1:comma].trim().to_owned())
   let scale = parse_int_inner(
-    type_name[comma + 1:type_name.length() - 1].trim().to_string(),
+    type_name[comma + 1:type_name.length() - 1].trim().to_owned(),
   )
   let big = parse_decimal_string(value, scale)
   if prec <= 9 {
@@ -407,11 +408,11 @@ fn write_decimal(
 
 ///|
 /// 解析十进制字符串为缩放后的 BigInt。
-fn parse_decimal_string(value : String, scale : Int) -> @bigint.BigInt raise {
+fn parse_decimal_string(value : String, scale : Int) -> @bigint.BigInt {
   let neg = value.has_prefix("-")
-  let s = if neg { value[1:].to_string() } else { value }
+  let s = if neg { value[1:].to_owned() } else { value }
   let (int_s, frac_s) = match s.find(".") {
-    Some(i) => (s[:i].to_string(), s[i + 1:].to_string())
+    Some(i) => (s[:i].to_owned(), s[i + 1:].to_owned())
     None => (s, "")
   }
   let mut frac = frac_s
@@ -419,12 +420,10 @@ fn parse_decimal_string(value : String, scale : Int) -> @bigint.BigInt raise {
     frac = frac + "0"
   }
   if frac.length() > scale {
-    frac = frac[:scale].to_string()
+    frac = frac[:scale].to_owned()
   }
   let digits = int_s + frac
-  let big = @bigint.BigInt::from_string(digits) catch {
-    _ => raise @lib.DbError::connection_error("invalid Decimal value: \{value}")
-  }
+  let big = @bigint.BigInt::from_string(digits)
   if neg {
     -big
   } else {
@@ -434,7 +433,7 @@ fn parse_decimal_string(value : String, scale : Int) -> @bigint.BigInt raise {
 
 ///|
 /// 写 BigInt 的小端字节（补码，固定长度）。
-fn write_big_le(buf : Buffer, big : @bigint.BigInt, nbytes : Int) -> Unit raise {
+fn write_big_le(buf : Buffer, big : @bigint.BigInt, nbytes : Int) -> Unit {
   let zero = @bigint.BigInt::from_int(0)
   let modulus = @bigint.BigInt::from_int(1) << (nbytes * 8)
   let v = if big < zero { modulus + big } else { big }
@@ -454,8 +453,8 @@ fn write_uuid_value(buf : Buffer, value : String) -> Unit raise {
   if parts.length() != 5 {
     raise @lib.DbError::connection_error("invalid UUID: \{value}")
   }
-  let hi_s = parts[0].to_string() + parts[1].to_string() + parts[2].to_string()
-  let lo_s = parts[3].to_string() + parts[4].to_string()
+  let hi_s = parts[0].to_owned() + parts[1].to_owned() + parts[2].to_owned()
+  let lo_s = parts[3].to_owned() + parts[4].to_owned()
   let hi = parse_hex64(hi_s)
   let lo = parse_hex64(lo_s)
   // 高 64 位小端

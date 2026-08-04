@@ -11,7 +11,7 @@
 /// `Nullable(T)` 的空值返回 `""`（与 HTTP 版一致）。
 async fn[R : @io.Reader] read_value(reader : R, type_name : String) -> String {
   if type_name.has_prefix("Nullable(") {
-    let inner = type_name[9:type_name.length() - 1].to_string()
+    let inner = type_name[9:type_name.length() - 1].to_owned()
     let is_null = reader.read_exactly(1)[0].to_uint()
     if is_null != 0 {
       return ""
@@ -19,7 +19,7 @@ async fn[R : @io.Reader] read_value(reader : R, type_name : String) -> String {
     return read_value(reader, inner)
   }
   if type_name.has_prefix("FixedString(") {
-    let n = parse_int_inner(type_name[12:type_name.length() - 1].to_string())
+    let n = parse_int_inner(type_name[12:type_name.length() - 1].to_owned())
     let bytes = reader.read_exactly(n)
     let mut end = bytes.length()
     while end > 0 && bytes[end - 1].to_uint() == 0 {
@@ -104,7 +104,7 @@ fn format_uuid(lo : UInt64, hi : UInt64) -> String {
   let hex_chars = "0123456789abcdef"
   let out = Buffer::Buffer()
   fn push_hex(buf : Buffer, v : UInt, shift : Int) -> Unit {
-    let idx = ((v >> shift) & 0xF).to_int()
+    let idx = ((v >> shift) & 0xF).reinterpret_as_int()
     buf.write_byte(hex_chars[idx].to_byte())
   }
   fn push_u32(buf : Buffer, v : UInt) -> Unit {
@@ -145,9 +145,9 @@ fn format_uuid(lo : UInt64, hi : UInt64) -> String {
 async fn[R : @io.Reader] read_int8(reader : R) -> Int {
   let u = reader.read_exactly(1)[0].to_uint()
   if u >= 128 {
-    u.to_int() - 256
+    u.reinterpret_as_int() - 256
   } else {
-    u.to_int()
+    u.reinterpret_as_int()
   }
 }
 
@@ -156,9 +156,9 @@ async fn[R : @io.Reader] read_int8(reader : R) -> Int {
 async fn[R : @io.Reader] read_int16(reader : R) -> Int {
   let u = read_uint16(reader).to_uint()
   if u >= 32768 {
-    u.to_int() - 65536
+    u.reinterpret_as_int() - 65536
   } else {
-    u.to_int()
+    u.reinterpret_as_int()
   }
 }
 
@@ -178,10 +178,10 @@ fn parse_int_inner(s : String) -> Int raise {
 ///|
 /// 解析类型参数中的第一个整数（如 DateTime64(3) → 3）。
 fn parse_type_param(type_name : String, marker : String) -> Int raise {
-  let open = type_name.find(marker).or(0)
-  let comma = type_name.find(",").or(type_name.length() - 1)
+  let open = type_name.find(marker).unwrap_or(0)
+  let comma = type_name.find(",").unwrap_or(type_name.length() - 1)
   let s = type_name[open + 1:comma].trim()
-  parse_int_inner(s.to_string())
+  parse_int_inner(s.to_owned())
 }
 
 ///|
@@ -199,7 +199,7 @@ async fn[R : @io.Reader] read_column_values(
   nrows : Int,
 ) -> Array[String] {
   if type_name.has_prefix("Nullable(") {
-    let inner = type_name[9:type_name.length() - 1].to_string()
+    let inner = type_name[9:type_name.length() - 1].to_owned()
     let masks = reader.read_exactly(nrows)
     let values = read_column_values(reader, inner, nrows)
     for r in 0..<nrows {
@@ -210,11 +210,11 @@ async fn[R : @io.Reader] read_column_values(
     return values
   }
   if type_name.has_prefix("Array(") {
-    let inner = type_name[6:type_name.length() - 1].to_string()
+    let inner = type_name[6:type_name.length() - 1].to_owned()
     return read_array_bulk(reader, inner, nrows)
   }
   if type_name.has_prefix("Map(") {
-    let inner = type_name[4:type_name.length() - 1].to_string()
+    let inner = type_name[4:type_name.length() - 1].to_owned()
     let parts = split_top_level(inner)
     if parts.length() != 2 {
       raise @lib.DbError::connection_error("invalid Map type: \{type_name}")
@@ -222,7 +222,7 @@ async fn[R : @io.Reader] read_column_values(
     return read_map_bulk(reader, parts[0], parts[1], nrows)
   }
   if type_name.has_prefix("Tuple(") {
-    let inner = type_name[6:type_name.length() - 1].to_string()
+    let inner = type_name[6:type_name.length() - 1].to_owned()
     let parts = split_top_level(inner)
     return read_tuple_bulk(reader, parts, nrows)
   }
@@ -366,11 +366,11 @@ fn split_top_level(s : String) -> Array[String] {
     } else if ch == ')' || ch == ']' {
       depth = depth - 1
     } else if ch == ',' && depth == 0 {
-      parts.push(s[start:i].trim().to_string())
+      parts.push(s[start:i].trim().to_owned())
       start = i + 1
     }
   }
-  parts.push(s[start:].trim().to_string())
+  parts.push(s[start:].trim().to_owned())
   parts
 }
 
@@ -394,9 +394,9 @@ async fn[R : @io.Reader] read_enum_value(
 ///|
 /// 解析 Enum 类型名中的 `'name' = value` 映射。
 fn parse_enum_map(type_name : String) -> Array[(Int, String)] {
-  let open = type_name.find("(").or(0)
+  let open = type_name.find("(").unwrap_or(0)
   let close = type_name.length() - 1
-  let inner = type_name[open + 1:close].to_string()
+  let inner = type_name[open + 1:close].to_owned()
   let entries = split_top_level(inner)
   let result : Array[(Int, String)] = []
   for entry in entries {
@@ -404,11 +404,11 @@ fn parse_enum_map(type_name : String) -> Array[(Int, String)] {
     match eq {
       Some(i) => {
         let name_sv = entry[:i].trim()
-        let val_s = entry[i + 1:].trim().to_string()
+        let val_s = entry[i + 1:].trim().to_owned()
         let name = name_sv.strip_prefix("\'").unwrap_or(name_sv)
         let name = name.strip_suffix("\'").unwrap_or(name)
         let val = parse_int_inner(val_s) catch { _ => 0 }
-        result.push((val, name.to_string()))
+        result.push((val, name.to_owned()))
       }
       None => ()
     }
@@ -419,12 +419,12 @@ fn parse_enum_map(type_name : String) -> Array[(Int, String)] {
 ///|
 /// Decimal 解码：按精度分派 32/64/128/256 位，输出十进制字符串。
 async fn[R : @io.Reader] read_decimal(reader : R, type_name : String) -> String {
-  let open = type_name.find("(").or(0)
-  let comma = type_name.find(",").or(type_name.length() - 1)
+  let open = type_name.find("(").unwrap_or(0)
+  let comma = type_name.find(",").unwrap_or(type_name.length() - 1)
   let prec_s = type_name[open + 1:comma].trim()
   let scale_s = type_name[comma + 1:type_name.length() - 1].trim()
-  let prec = parse_int_inner(prec_s.to_string())
-  let scale = parse_int_inner(scale_s.to_string())
+  let prec = parse_int_inner(prec_s.to_owned())
+  let scale = parse_int_inner(scale_s.to_owned())
   let big = if prec <= 9 {
     @bigint.BigInt::from_int64(read_int32(reader).to_int64())
   } else if prec <= 18 {
@@ -479,7 +479,7 @@ fn format_big_decimal(big : @bigint.BigInt, scale : Int) -> String {
   frac_padded = frac_padded + frac
   // 去掉小数尾零（与 HTTP 文本格式一致：1.50 → 1.5，1.00 → 1）
   while frac_padded.length() > 0 && frac_padded[frac_padded.length() - 1] == '0' {
-    frac_padded = frac_padded[:frac_padded.length() - 1].to_string()
+    frac_padded = frac_padded[:frac_padded.length() - 1].to_owned()
   }
   if negative {
     if frac_padded.length() == 0 {
@@ -569,7 +569,7 @@ fn hex_group(v : Int) -> String {
   let mut s = ""
   let mut x = v
   while x > 0 {
-    s = hex_chars[x % 16:x % 16 + 1].to_string() + s
+    s = hex_chars[x % 16:x % 16 + 1].to_owned() + s
     x = x / 16
   }
   s
@@ -630,25 +630,6 @@ fn format_datetime(seconds : Int64) -> String {
 }
 
 ///|
-/// 格式化 DateTime64（按精度缩放的 Int64 值，UTC）。
-fn format_datetime64(v : Int64, scale : Int) -> String {
-  if scale <= 0 {
-    return format_datetime(v)
-  }
-  let mut pow : Int64 = 1L
-  for i in 0..<scale {
-    ignore(i)
-    pow = pow * 10L
-  }
-  let seconds = v / pow
-  let frac = v % pow
-  if frac < 0L {
-    return format_datetime(seconds - 1L) + "." + pad_int(frac + pow, scale)
-  }
-  format_datetime(seconds) + "." + pad_int(frac, scale)
-}
-
-///|
 /// 解析类型名中的时区（`DateTime('Asia/Shanghai')` / `DateTime64(3, 'Asia/Shanghai')`），
 /// 返回相对 UTC 的偏移（分钟）。未知时区按 0（UTC），文档注明 DST 用标准偏移近似。
 fn timezone_offset(type_name : String) -> Int {
@@ -678,17 +659,17 @@ fn timezone_offset(type_name : String) -> Int {
   if start < 0 {
     return 0
   }
-  let tz = type_name[start + 1:end].to_string()
+  let tz = type_name[start + 1:end].to_owned()
   // Etc/GMT±N 直接解析
   if tz.has_prefix("Etc/GMT") || tz == "GMT" {
-    let rest = if tz == "GMT" { "" } else { tz[7:].to_string() }
+    let rest = if tz == "GMT" { "" } else { tz[7:].to_owned() }
     if rest == "" {
       return 0
     }
     // Etc/GMT 符号约定反转：Etc/GMT-3 表示 UTC+3
     let sign = if rest.has_prefix("-") { 1 } else { -1 }
     let num_s = if rest.has_prefix("-") || rest.has_prefix("+") {
-      rest[1:].to_string()
+      rest[1:].to_owned()
     } else {
       rest
     }

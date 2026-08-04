@@ -45,12 +45,6 @@ pub fn write_compressed_block(@buffer.Buffer, Bytes) -> Unit
 // Errors
 
 // Types and methods
-type BlockData
-
-type ClientPacket
-
-type ColumnHeader
-
 pub struct NativeConfig {
   host : String
   port : Int
@@ -102,8 +96,6 @@ pub fn NativeResultSetCursor::columns(Self) -> Array[@clickhouse-driver.Column]
 pub async fn NativeResultSetCursor::next(Self) -> @clickhouse-driver.Row?
 
 type ServerHello
-
-type ServerPacket
 
 // Type aliases
 

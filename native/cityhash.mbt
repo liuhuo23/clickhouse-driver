@@ -78,47 +78,10 @@ fn hash_len0to16(bytes : Bytes, len : Int) -> UInt64 {
     let b = bytes[len >> 1].to_uint()
     let c = bytes[len - 1].to_uint()
     let y = a.to_uint64() + (b.to_uint64() << 8)
-    let z = (len.to_uint() + (c << 2)).to_uint64()
+    let z = (len.reinterpret_as_uint() + (c << 2)).to_uint64()
     return shift_mix((y * K2) ^ (z * K3)) * K2
   }
   K2
-}
-
-///|
-fn hash_len17to32(bytes : Bytes, len : Int) -> UInt64 {
-  let a = fetch64(bytes, 0) * K1
-  let b = fetch64(bytes, 8)
-  let c = fetch64(bytes, len - 8) * K2
-  let d = fetch64(bytes, len - 16) * K0
-  hash_len16(
-    rotate(a - b, 43) + rotate(c, 30) + d,
-    a + rotate(b ^ K3, 20) - c + len.to_uint64(),
-  )
-}
-
-///|
-fn hash_len33to64(bytes : Bytes, len : Int) -> UInt64 {
-  let mut z = fetch64(bytes, 24)
-  let mut a = fetch64(bytes, 0) +
-    K0 * (len.to_uint64() + fetch64(bytes, len - 16))
-  let mut b = rotate(a + z, 52)
-  let mut c = rotate(a, 37)
-  a = a + fetch64(bytes, 8)
-  c = c + rotate(a, 7)
-  a = a + fetch64(bytes, 16)
-  let vf = a + z
-  let vs = b + rotate(a, 31) + c
-  a = fetch64(bytes, 16) + fetch64(bytes, len - 32)
-  z = fetch64(bytes, len - 8)
-  b = rotate(a + z, 52)
-  c = rotate(a, 37)
-  a = a + fetch64(bytes, len - 24)
-  c = c + rotate(a, 7)
-  a = a + fetch64(bytes, len - 16)
-  let wf = a + z
-  let ws = b + rotate(a, 31) + c
-  let r = shift_mix(K2 * (vf + ws) + K0 * (wf + vs))
-  shift_mix(vs + r * K0) * K2
 }
 
 ///|
@@ -269,7 +232,7 @@ pub fn city_hash128(bytes : Bytes) -> (UInt64, UInt64) {
   let len = bytes.length()
   if len >= 16 {
     cityhash128_with_seed(
-      bytes.view(start=16, end=len).to_bytes(),
+      bytes.view(start=16, end=len).to_owned(),
       len - 16,
       fetch64(bytes, 0) ^ K3,
       fetch64(bytes, 8),

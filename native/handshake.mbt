@@ -4,12 +4,9 @@
 ///|
 /// 服务器 Hello 信息（握手成功后的服务端元数据）。
 struct ServerHello {
-  name : String
   version_major : UInt64
   version_minor : UInt64
-  revision : UInt64
   timezone : String
-  display_name : String
   version_patch : UInt64
 }
 
@@ -37,31 +34,22 @@ fn build_hello(
 /// 从 reader 读取并解析服务器 Hello 包。
 /// 额外字段按服务器返回的 revision 条件读取。
 pub async fn[R : @io.Reader] read_server_hello(reader : R) -> ServerHello {
-  let name = read_string(reader)
+  ignore(read_string(reader)) // name（未使用）
   let major = read_varuint(reader)
   let minor = read_varuint(reader)
   let revision = read_varuint(reader)
   let mut timezone = ""
-  let mut display_name = ""
   let mut version_patch : UInt64 = 0
   if revision >= 54058 {
     timezone = read_string(reader)
   }
   if revision >= 54372 {
-    display_name = read_string(reader)
+    ignore(read_string(reader)) // display_name（未使用）
   }
   if revision >= 54401 {
     version_patch = read_varuint(reader)
   }
-  {
-    name,
-    version_major: major,
-    version_minor: minor,
-    revision,
-    timezone,
-    display_name,
-    version_patch,
-  }
+  { version_major: major, version_minor: minor, timezone, version_patch }
 }
 
 ///|

@@ -92,8 +92,8 @@ async test "native integration: select basic types" {
   assert_eq(rs.rows[0].values[1], "-2")
   assert_eq(rs.rows[0].values[2], "-300")
   assert_eq(rs.rows[0].values[3], "1234567890123")
-  assert_true(rs.rows[0].values[4].starts_with("1.5"))
-  assert_true(rs.rows[0].values[5].starts_with("2.25"))
+  assert_true(rs.rows[0].values[4].has_prefix("1.5"))
+  assert_true(rs.rows[0].values[5].has_prefix("2.25"))
   assert_eq(rs.rows[0].values[6], "hello")
   conn.close()
 }
@@ -509,7 +509,7 @@ async test "native integration: compressed mode" {
     conn.close()
     false
   } catch {
-    @lib.DbError::ServerError(code~, name~, message~) => {
+    @lib.DbError::ServerError(code~, name=_, message~) => {
       println("COMP SERVER \{code}: \{message}")
       true
     }
@@ -522,7 +522,7 @@ async test "native integration: compressed mode" {
       true
     }
   }
-  assert_true(not(caught))
+  assert_true(!caught)
 }
 
 ///|

@@ -19,12 +19,12 @@ fn lz4_decompress(src : Bytes, expected : Int) -> Bytes raise {
   while ip < src.length() {
     let token = src[ip].to_uint()
     ip = ip + 1
-    let mut lit_len = (token >> 4).to_int()
+    let mut lit_len = (token >> 4).reinterpret_as_int()
     if lit_len == 15 {
       while true {
         let b = src[ip].to_uint()
         ip = ip + 1
-        lit_len = lit_len + b.to_int()
+        lit_len = lit_len + b.reinterpret_as_int()
         if b != 255 {
           break
         }
@@ -48,18 +48,18 @@ fn lz4_decompress(src : Bytes, expected : Int) -> Bytes raise {
     if offset == 0 {
       raise @lib.DbError::connection_error("lz4: zero offset")
     }
-    let mut match_len = (token & 0xF).to_int() + 4
+    let mut match_len = (token & 0xF).reinterpret_as_int() + 4
     if (token & 0xF) == 15 {
       while true {
         let b = src[ip].to_uint()
         ip = ip + 1
-        match_len = match_len + b.to_int()
+        match_len = match_len + b.reinterpret_as_int()
         if b != 255 {
           break
         }
       }
     }
-    let start = out.length() - offset.to_int()
+    let start = out.length() - offset.reinterpret_as_int()
     if start < 0 {
       raise @lib.DbError::connection_error("lz4: offset before start")
     }
@@ -83,20 +83,20 @@ pub async fn[R : @io.Reader] read_payload(
   reader : R,
   compression : Bool,
 ) -> Bytes {
-  if not(compression) {
+  if !compression {
     return read_string_bytes(reader)
   }
   ignore(reader.read_exactly(16)) // CityHash128 checksum（跳过验证）
-  let method = reader.read_exactly(1)[0].to_uint()
-  let comp_size = read_uint32(reader).to_int()
-  let uncomp_size = read_uint32(reader).to_int()
+  let comp_method = reader.read_exactly(1)[0].to_uint()
+  let comp_size = read_uint32(reader).reinterpret_as_int()
+  let uncomp_size = read_uint32(reader).reinterpret_as_int()
   if comp_size < 9 || comp_size > 0x40000000 {
     raise @lib.DbError::connection_error(
       "invalid compressed block size: \{comp_size}",
     )
   }
   let data = reader.read_exactly(comp_size - 9)
-  match method {
+  match comp_method {
     0x82 => lz4_decompress(data, uncomp_size)
     0x02 => data // None：明文（未压缩）
     0x90 =>
@@ -105,7 +105,7 @@ pub async fn[R : @io.Reader] read_payload(
       )
     _ =>
       raise @lib.DbError::connection_error(
-        "unknown compression method: 0x\{method.to_uint64().to_string(radix=16)}",
+        "unknown compression method: 0x\{comp_method.to_uint64().to_string(radix=16)}",
       )
   }
 }
@@ -148,8 +148,8 @@ pub fn write_compressed_block(buf : Buffer, payload : Bytes) -> Unit {
   let lz = lz4_compress_literals(payload)
   let body = Buffer::Buffer(size_hint=9 + lz.length())
   body.write_byte(0x82) // LZ4
-  write_uint32(body, (9 + lz.length()).to_uint())
-  write_uint32(body, payload.length().to_uint())
+  write_uint32(body, (9 + lz.length()).reinterpret_as_uint())
+  write_uint32(body, payload.length().reinterpret_as_uint())
   body.write_bytes(lz)
   let body_bytes = body.to_bytes()
   let (lo, hi) = city_hash128(body_bytes)

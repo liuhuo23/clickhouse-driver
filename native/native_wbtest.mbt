@@ -3,6 +3,22 @@
 /// 编码 → 已知字节序列 / 解码回环 双向验证。
 
 ///|
+/// 从 `bytes[offset:]` 解析带长度前缀的字符串，返回 `(值, 新 offset)`。
+/// 仅测试辅助（库代码用异步 `read_string`），保留在 wbtest 中。
+fn decode_string(bytes : Bytes, offset : Int) -> (String, Int) raise {
+  let (len, pos) = decode_varuint(bytes, offset)
+  if len > 2147483647 {
+    raise @lib.DbError::connection_error("string length out of range")
+  }
+  let len = len.to_int()
+  if len < 0 || pos + len > bytes.length() {
+    raise @lib.DbError::connection_error("string length out of range")
+  }
+  let end = pos + len
+  (@utf8.decode(bytes.view(start=pos, end~)), end)
+}
+
+///|
 test "varuint roundtrip" {
   let cases : Array[UInt64] = [
     0, 1, 127, 128, 300, 16384, 4294967295, 0x4000000000000000, 0xFFFFFFFFFFFFFFFF,
@@ -256,7 +272,10 @@ test "datetime formatting" {
   assert_eq(format_datetime(86400), "1970-01-02 00:00:00")
   assert_eq(format_datetime(1785621296), "2026-08-01 21:54:56")
   // DateTime64(3)
-  assert_eq(format_datetime64(1785635696123, 3), "2026-08-02 01:54:56.123")
+  assert_eq(
+    format_datetime64_offset(1785635696123, 3, 0),
+    "2026-08-02 01:54:56.123",
+  )
 }
 
 ///|
@@ -352,7 +371,7 @@ test "empty data packet structure" {
 
 ///|
 async test "read block with basic types" {
-  let reader = @io.MemoryReader::MemoryReader(fn(writer) {
+  let reader = @io.MemoryReader::MemoryReader(writer => {
     // 1 列 UInt8，2 行：值 1, 200
     let buf = Buffer::Buffer()
     write_varuint(buf, 1) // blockinfo field1
@@ -380,7 +399,7 @@ async test "read block with basic types" {
 
 ///|
 async test "read block with nullable column" {
-  let reader = @io.MemoryReader::MemoryReader(fn(writer) {
+  let reader = @io.MemoryReader::MemoryReader(writer => {
     let buf = Buffer::Buffer()
     write_varuint(buf, 1)
     buf.write_byte(0)
@@ -407,7 +426,7 @@ async test "read block with nullable column" {
 
 ///|
 async test "read block with string and datetime" {
-  let reader = @io.MemoryReader::MemoryReader(fn(writer) {
+  let reader = @io.MemoryReader::MemoryReader(writer => {
     let buf = Buffer::Buffer()
     write_varuint(buf, 1)
     buf.write_byte(0)
@@ -435,7 +454,7 @@ async test "read block with string and datetime" {
 
 ///|
 async test "read block with zero rows only headers" {
-  let reader = @io.MemoryReader::MemoryReader(fn(writer) {
+  let reader = @io.MemoryReader::MemoryReader(writer => {
     let buf = Buffer::Buffer()
     write_varuint(buf, 0) // blockinfo 直接结束
     write_varuint(buf, 2) // ncols
@@ -455,31 +474,26 @@ async test "read block with zero rows only headers" {
 
 ///|
 async test "unsupported type raises connection error" {
+  // 直接在内存构造 reader 并解码未支持类型会走 unsupported 分支
+  let reader = @io.MemoryReader::MemoryReader(writer => {
+    let buf = Buffer::Buffer()
+    write_varuint(buf, 0)
+    write_varuint(buf, 1)
+    write_varuint(buf, 1)
+    write_string(buf, "c")
+    write_string(buf, "AggregateFunction(uniq, UInt64)") // 未支持类型
+    buf.write_byte(0)
+    write_uint64(buf, 0)
+    flush_bytes(writer, buf.to_bytes())
+  })
   let caught = try {
-    // 直接在内存构造 reader 并解码未支持类型会走 unsupported 分支
-    let reader = @io.MemoryReader::MemoryReader(fn(writer) {
-      let buf = Buffer::Buffer()
-      write_varuint(buf, 0)
-      write_varuint(buf, 1)
-      write_varuint(buf, 1)
-      write_string(buf, "c")
-      write_string(buf, "AggregateFunction(uniq, UInt64)") // 未支持类型
-      buf.write_byte(0)
-      write_uint64(buf, 0)
-      flush_bytes(writer, buf.to_bytes())
-    })
-    let result = try {
-      ignore(read_block(reader))
-      false
-    } catch {
-      @lib.DbError::ConnectionError(_) => true
-      _ => false
-    }
-    reader.close()
-    result
+    ignore(read_block(reader))
+    false
   } catch {
+    @lib.DbError::ConnectionError(_) => true
     _ => false
   }
+  reader.close()
   assert_true(caught)
 }
 
@@ -510,7 +524,7 @@ test "write_value numeric roundtrip" {
   // Int8 = 1 字节（-128 → 0x80）
   assert_eq(bytes[p4].to_int(), 0x80)
   let (u6, p6) = decode_uint16(bytes, p4 + 1) // Int16 = 2 字节
-  assert_eq(u6.to_uint().to_int() - 65536, -32768)
+  assert_eq(u6.to_uint().reinterpret_as_int() - 65536, -32768)
   let (v7, p7) = decode_int32(bytes, p6)
   assert_eq(v7, -2147483648)
   let (v8, p8) = decode_int64(bytes, p7)
@@ -855,7 +869,7 @@ test "nested value formatting" {
 ///|
 /// 用 MemoryReader 调用 read_decimal_big。
 async fn read_decimal_big_async(bytes : Bytes, n : Int) -> @bigint.BigInt {
-  let reader = @io.MemoryReader::MemoryReader(fn(writer) {
+  let reader = @io.MemoryReader::MemoryReader(writer => {
     flush_bytes(writer, bytes)
   })
   let v = read_decimal_big(reader, n)
@@ -865,7 +879,7 @@ async fn read_decimal_big_async(bytes : Bytes, n : Int) -> @bigint.BigInt {
 
 ///|
 async test "decimal write roundtrip" {
-  let reader = @io.MemoryReader::MemoryReader(fn(writer) {
+  let reader = @io.MemoryReader::MemoryReader(writer => {
     let buf = Buffer::Buffer()
     write_value(buf, "Decimal(38, 3)", "123456789.123")
     write_value(buf, "Decimal(9, 2)", "-0.50")
@@ -890,10 +904,10 @@ test "write uuid and ipv4" {
   write_ipv4(buf, "0.0.0.0")
   let bytes = buf.to_bytes()
   // UUID 高 64 位小端在前
-  let (hi, p1) = decode_uint64(bytes, 0)
-  let (lo, p2) = decode_uint64(bytes, 8)
+  let (hi, _) = decode_uint64(bytes, 0)
+  let (lo, _) = decode_uint64(bytes, 8)
   assert_eq(format_uuid(lo, hi), "123e4567-e89b-12d3-a456-426614174000")
-  let (hi2, p3) = decode_uint64(bytes, 16)
+  let (hi2, _) = decode_uint64(bytes, 16)
   let (lo2, p4) = decode_uint64(bytes, 24)
   assert_eq(format_uuid(lo2, hi2), "00000000-0000-0000-0000-000000000000")
   // IPv4：UInt32 小端（127.0.0.1 → 01 00 00 7f）
@@ -942,9 +956,6 @@ test "timezone offset parsing" {
 ///|
 test "lz4 decompress samples" {
   // 样本来自 Python lz4.block.compress（与 ClickHouse LZ4_compress_default 同格式）
-  let cases : Array[(Bytes, Bytes, Int)] = [
-    (b"\x68\x65\x6c\x6c\x6f\x20\x77\x6f\x72\x6c\x64", b"hello world", 0),
-  ]
   let d1 = lz4_decompress(
     b"\xb0\x68\x65\x6c\x6c\x6f\x20\x77\x6f\x72\x6c\x64", 11,
   )
@@ -966,7 +977,7 @@ test "lz4 decompress samples" {
 
 ///|
 async test "read compressed payload" {
-  let reader = @io.MemoryReader::MemoryReader(fn(writer) {
+  let reader = @io.MemoryReader::MemoryReader(writer => {
     // 构造 C++ 格式压缩块：16B checksum(0) + comp_size + uncomp_size + 0x82 + LZ4
     let buf = Buffer::Buffer()
     for _ in 0..<16 {
@@ -974,7 +985,7 @@ async test "read compressed payload" {
     }
     let payload = b"\xb0\x68\x65\x6c\x6c\x6f\x20\x77\x6f\x72\x6c\x64" // LZ4("hello world")
     buf.write_byte(0x82) // method: LZ4
-    write_uint32(buf, (9 + payload.length()).to_uint()) // comp_size
+    write_uint32(buf, (9 + payload.length()).reinterpret_as_uint()) // comp_size
     write_uint32(buf, 11) // uncomp_size
     buf.write_bytes(payload)
     flush_bytes(writer, buf.to_bytes())
@@ -986,7 +997,7 @@ async test "read compressed payload" {
 
 ///|
 async test "read uncompressed payload when compression off" {
-  let reader = @io.MemoryReader::MemoryReader(fn(writer) {
+  let reader = @io.MemoryReader::MemoryReader(writer => {
     let buf = Buffer::Buffer()
     write_string(buf, "plain data")
     flush_bytes(writer, buf.to_bytes())
@@ -1021,7 +1032,7 @@ test "cityhash128 vectors" {
   }
   // 长输入（>= 128 走 with_seed 主路径）
   let long = Buffer::Buffer()
-  for i in 0..<100 {
+  for _ in 0..<100 {
     long.write_bytes(b"data")
   }
   let (l2, h2) = city_hash128(long.to_bytes())
@@ -1077,7 +1088,7 @@ test "cityhash128 full vector check" {
   }
   // data*100（400 字节）
   let dbuf = Buffer::Buffer()
-  for i in 0..<100 {
+  for _ in 0..<100 {
     dbuf.write_bytes(b"data")
   }
   let (dl, dh) = city_hash128(dbuf.to_bytes())

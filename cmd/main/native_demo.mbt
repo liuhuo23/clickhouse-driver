@@ -55,7 +55,7 @@ async fn run_native_demo() -> Unit {
     )
     println("[2] columns=" + rs.columns.length().to_string())
     if rs.rows.length() > 0 {
-      println("[2] row=" + rs.rows[0].values.to_string())
+      println("[2] row=" + @debug.to_string(rs.rows[0].values))
     }
 
     // ---- 3. 多行 + NULL ----
@@ -68,7 +68,7 @@ async fn run_native_demo() -> Unit {
       " (NULL 显示为空字符串)",
     )
     for row in rs2.rows {
-      println("[3]   " + row.values.to_string())
+      println("[3]   " + @debug.to_string(row.values))
     }
 
     // ---- 4. 语法错误 → ServerError（连接保持可用）----
@@ -76,7 +76,7 @@ async fn run_native_demo() -> Unit {
       ignore(conn.execute_query("SLECT 1"))
       false
     } catch {
-      @lib.DbError::ServerError(code~, name~, message~) => {
+      @lib.DbError::ServerError(code~, name=_, message~) => {
         println(
           "[4] expected ServerError code=" + code.to_string() + ": " + message,
         )
@@ -106,7 +106,7 @@ async fn run_native_demo() -> Unit {
     )
     println("[5] insert 3 rows, select back:")
     for row in rs_ins.rows {
-      println("[5]   " + row.values.to_string())
+      println("[5]   " + @debug.to_string(row.values))
     }
     ignore(conn.execute_query("DROP TABLE IF EXISTS native_demo_ins"))
 
@@ -118,9 +118,9 @@ async fn run_native_demo() -> Unit {
     let rs_p2 = conn.execute("SELECT ? AS a, ? AS b", ["7", "world"])
     println(
       "[6] named=" +
-      rs_p1.rows[0].values.to_string() +
+      @debug.to_string(rs_p1.rows[0].values) +
       " positional=" +
-      rs_p2.rows[0].values.to_string(),
+      @debug.to_string(rs_p2.rows[0].values),
     )
 
     // ---- 7. 流式游标（逐块读取，不缓存全部结果）----
@@ -131,7 +131,7 @@ async fn run_native_demo() -> Unit {
       match cur.next() {
         Some(row) => {
           n_rows = n_rows + 1
-          println("[7]   row=" + row.values.to_string())
+          println("[7]   row=" + @debug.to_string(row.values))
         }
         None => break
       }

@@ -25,7 +25,7 @@ const CLIENT_VERSION_MINOR : UInt64 = 0
 
 ///|
 /// 客户端 → 服务器包类型。
-enum ClientPacket {
+priv enum ClientPacket {
   Hello
   Query
   Data
@@ -46,7 +46,7 @@ fn ClientPacket::to_int(self : ClientPacket) -> Int {
 
 ///|
 /// 服务器 → 客户端包类型。
-enum ServerPacket {
+priv enum ServerPacket {
   Hello
   Data
   Exception
@@ -167,21 +167,6 @@ fn decode_varuint(bytes : Bytes, offset : Int) -> (UInt64, Int) raise {
 }
 
 ///|
-/// 从 `bytes[offset:]` 解析带长度前缀的字符串，返回 `(值, 新 offset)`。
-fn decode_string(bytes : Bytes, offset : Int) -> (String, Int) raise {
-  let (len, pos) = decode_varuint(bytes, offset)
-  if len > 2147483647 {
-    raise @lib.DbError::connection_error("string length out of range")
-  }
-  let len = len.to_int()
-  if len < 0 || pos + len > bytes.length() {
-    raise @lib.DbError::connection_error("string length out of range")
-  }
-  let end = pos + len
-  (@utf8.decode(bytes.view(start=pos, end~)), end)
-}
-
-///|
 /// 从 `bytes[offset:]` 解析 16 位小端无符号整数。
 fn decode_uint16(bytes : Bytes, offset : Int) -> (UInt16, Int) raise {
   if offset + 2 > bytes.length() {
@@ -235,7 +220,7 @@ fn decode_int64(bytes : Bytes, offset : Int) -> (Int64, Int) raise {
 /// 从 `bytes[offset:]` 解析 32 位小端单精度浮点（IEEE-754）。
 fn decode_float32(bytes : Bytes, offset : Int) -> (Float, Int) raise {
   let (u, pos) = decode_uint32(bytes, offset)
-  (u.reinterpret_as_float(), pos)
+  (Float::reinterpret_from_uint(u), pos)
 }
 
 ///|

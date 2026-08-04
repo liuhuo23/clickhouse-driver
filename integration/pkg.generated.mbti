@@ -10,6 +10,8 @@ pub fn async_runtime_loaded() -> Bool
 
 pub fn make_ci_conn(host~ : String, port~ : Int, user~ : String, password~ : String, database~ : String) -> @clickhouse-driver.Connection
 
+pub fn native_runtime_loaded() -> Bool
+
 // Errors
 
 // Types and methods

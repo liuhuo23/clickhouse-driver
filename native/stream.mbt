@@ -50,7 +50,7 @@ pub async fn NativeConnection::execute_stream(
 async fn NativeResultSetCursor::prepare_first_block(
   self : NativeResultSetCursor,
 ) -> Unit {
-  while not(self.done[0]) {
+  while !self.done[0] {
     let ptype = read_varuint(self.conn.tcp)
     match ServerPacket::from_int(ptype.to_int()) {
       Data => {
@@ -179,7 +179,7 @@ pub fn NativeResultSetCursor::columns(
 ///|
 /// 关闭游标：把连接上剩余数据读取到 EndOfStream，以便连接复用。
 pub async fn NativeResultSetCursor::close(self : NativeResultSetCursor) -> Unit {
-  while not(self.done[0]) {
+  while !self.done[0] {
     let ptype = read_varuint(self.conn.tcp)
     match ServerPacket::from_int(ptype.to_int()) {
       EndOfStream => {
