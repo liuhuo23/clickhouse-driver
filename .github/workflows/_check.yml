@@ -1,0 +1,32 @@
+name: _check
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        type: string
+        default: 'ubuntu-latest'
+
+jobs:
+  check:
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-moonbit
+
+      - name: moon check
+        run: moon check --target native
+
+      - name: moon test (unit)
+        run: moon test -p liuhuo23/clickhouse-driver --target native
+
+      - name: lint
+        run: |
+          moon fmt && git diff --exit-code
+          moon info && git diff --exit-code

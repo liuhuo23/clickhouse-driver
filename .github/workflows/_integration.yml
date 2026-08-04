@@ -1,0 +1,35 @@
+name: _integration
+
+on:
+  workflow_call:
+    inputs:
+      clickhouse-image:
+        type: string
+        default: 'clickhouse/clickhouse-server:24.8'
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CLICKHOUSE_INTEGRATION: "1"
+      CLICKHOUSE_HOST: 127.0.0.1
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: barn
+      CLICKHOUSE_DATABASE: default
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-moonbit
+
+      - uses: ./.github/actions/start-clickhouse
+        with:
+          image: ${{ inputs.clickhouse-image }}
+
+      - name: integration tests
+        run: moon test integration/ --target native

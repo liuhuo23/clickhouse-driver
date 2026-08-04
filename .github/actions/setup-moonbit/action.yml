@@ -1,0 +1,23 @@
+name: Setup MoonBit
+description: Install MoonBit toolchain and update dependencies
+
+inputs:
+  moonbit-version:
+    description: 'MoonBit version constraint (empty = latest stable)'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install MoonBit
+      shell: bash
+      run: |
+        curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+        echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+    - name: MoonBit version & update
+      shell: bash
+      run: |
+        moon version --all
+        moon update

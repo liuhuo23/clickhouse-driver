@@ -1,0 +1,17 @@
+{
+  "name": "ClickHouse Driver Dev",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "postCreateCommand": {
+    "moonbit": "curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash && echo 'export PATH=$HOME/.moon/bin:$PATH' >> ~/.bashrc"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "moonbitlang.moonbit-lang"
+      ]
+    }
+  }
+}

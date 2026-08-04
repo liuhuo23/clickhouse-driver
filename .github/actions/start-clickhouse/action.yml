@@ -1,0 +1,53 @@
+name: Start ClickHouse
+description: Start a ClickHouse container, wait for readiness, and clean up on completion
+
+inputs:
+  image:
+    description: 'ClickHouse Docker image'
+    required: false
+    default: 'clickhouse/clickhouse-server:24.8'
+  port:
+    description: 'HTTP port'
+    required: false
+    default: '8123'
+  user:
+    description: 'ClickHouse user'
+    required: false
+    default: 'default'
+  password:
+    description: 'ClickHouse password'
+    required: false
+    default: 'barn'
+
+runs:
+  using: composite
+  steps:
+    - name: Start ClickHouse
+      shell: bash
+      run: |
+        docker rm -f clickhouse 2>/dev/null || true
+        docker run -d --rm --name clickhouse \
+          -p ${{ inputs.port }}:8123 \
+          -e CLICKHOUSE_USER=${{ inputs.user }} \
+          -e CLICKHOUSE_PASSWORD=${{ inputs.password }} \
+          -e CLICKHOUSE_DB=default \
+          ${{ inputs.image }}
+
+    - name: Wait for ClickHouse
+      shell: bash
+      run: |
+        for i in $(seq 1 60); do
+          if curl -fsS http://127.0.0.1:${{ inputs.port }}/ping >/dev/null 2>&1; then
+            echo "ClickHouse ready after ${i} probe(s)"
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "ClickHouse did not become ready within 120s"
+        docker logs clickhouse || true
+        exit 1
+
+    - name: Stop ClickHouse
+      if: always()
+      shell: bash
+      run: docker rm -f clickhouse 2>/dev/null || true

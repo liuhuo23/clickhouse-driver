@@ -1089,12 +1089,7 @@ test "cityhash128 full vector check" {
 
 ///|
 test "connection pool config" {
-  let config = native_config(
-    host="h",
-    user="u",
-    password="p",
-    database="d",
-  )
+  let config = native_config(host="h", user="u", password="p", database="d")
   let pool = config.pool(size=3)
   assert_eq(pool.max_size(), 3)
   // size <= 0 时按默认 4

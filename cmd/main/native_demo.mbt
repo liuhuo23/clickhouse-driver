@@ -140,13 +140,9 @@ async fn run_native_demo() -> Unit {
     println("[7] stream rows=" + n_rows.to_string())
 
     // ---- 8. 连接池（复用持久连接，acquire/release 模式）----
-    let pool = @native.native_config(
-      host~,
-      port~,
-      user~,
-      password~,
-      database~,
-    ).pool(size=2)
+    let pool = @native.native_config(host~, port~, user~, password~, database~).pool(
+      size=2,
+    )
     ignore(
       pool.execute_query(
         "CREATE TABLE IF NOT EXISTS native_pool_demo (id UInt32, name String) ENGINE = Memory",
@@ -155,11 +151,7 @@ async fn run_native_demo() -> Unit {
     ignore(pool.execute_query("TRUNCATE TABLE native_pool_demo"))
     let rs_pool = pool.execute_query("SELECT number AS n FROM numbers(4)")
     println("[8] pool query rows=" + rs_pool.rows.length().to_string())
-    pool.insert(
-      "native_pool_demo",
-      ["id", "name"],
-      [["10", "pooled"]],
-    )
+    pool.insert("native_pool_demo", ["id", "name"], [["10", "pooled"]])
     let rs_pool2 = pool.execute_query(
       "SELECT name FROM native_pool_demo WHERE id = 10",
     )

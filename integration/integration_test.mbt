@@ -217,6 +217,14 @@ async test "integration: update rows" {
 async test "integration: table name param" {
   let conn = integration_conn()
   defer conn.close()
+  // Identifier parameterisation ({name: Identifier}) requires ClickHouse >= 25.
+  // On older versions the fallback {tn} (String) is quoted as a string
+  // literal, which is invalid SQL in FROM position.
+  if !supports_identifier_param(conn) {
+    fail(
+      "table name param requires ClickHouse >= 25 (Identifier type not supported)",
+    )
+  }
   let table = TABLE_BASE + "_tbl"
   setup_table(conn, table)
   ignore(
@@ -224,15 +232,8 @@ async test "integration: table name param" {
       "7", "seven", "2024-03-03 03:03:03",
     ]),
   )
-  // ClickHouse >= 25 requires `{name: Identifier}` for identifiers; older
-  // versions accept the untyped `{tn}` form (defaulted to String).
-  let placeholder = if supports_identifier_param(conn) {
-    "{tn: Identifier}"
-  } else {
-    "{tn}"
-  }
   let r = conn.execute_query(
-    "SELECT count() AS c FROM " + placeholder,
+    "SELECT count() AS c FROM {tn: Identifier}",
     params=Map::from_array([("tn", table)]),
   )
   assert_eq(r.rows[0].values[0], "1")
