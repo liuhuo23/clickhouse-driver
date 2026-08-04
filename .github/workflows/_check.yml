@@ -19,8 +19,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/setup-moonbit
-        with:
-          moonbit-version: 0.1.20260724
 
       - name: moon check
         run: moon check --target native

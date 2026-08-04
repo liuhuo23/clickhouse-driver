@@ -17,4 +17,3 @@ pub fn make_ci_conn(host~ : String, port~ : Int, user~ : String, password~ : Str
 // Type aliases
 
 // Traits
-
