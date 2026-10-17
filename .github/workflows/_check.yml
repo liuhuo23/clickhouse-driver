@@ -30,6 +30,9 @@ jobs:
       - name: moon test (unit, native driver)
         run: moon test -p liuhuo23/clickhouse-driver/native --target native
 
+      - name: moon test (unit, internal helpers)
+        run: moon test -p liuhuo23/clickhouse-driver/internal --target native
+
       - name: lint
         run: |
           moon fmt --check

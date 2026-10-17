@@ -158,6 +158,7 @@ in its generated `pkg.generated.mbti` — never edit that file by hand.
   ```bash
   moon test -p liuhuo23/clickhouse-driver --target native
   moon test -p liuhuo23/clickhouse-driver/native --target native
+  moon test -p liuhuo23/clickhouse-driver/internal --target native
   ```
 
 - **Integration tests** need a real ClickHouse. `docker-compose.yml` (or the
