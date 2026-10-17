@@ -33,7 +33,7 @@ fn build_hello(
 ///|
 /// 从 reader 读取并解析服务器 Hello 包。
 /// 额外字段按服务器返回的 revision 条件读取。
-pub async fn[R : @io.Reader] read_server_hello(reader : R) -> ServerHello {
+async fn[R : @io.Reader] read_server_hello(reader : R) -> ServerHello {
   ignore(read_string(reader)) // name（未使用）
   let major = read_varuint(reader)
   let minor = read_varuint(reader)

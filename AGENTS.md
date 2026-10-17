@@ -44,14 +44,28 @@ in its generated `pkg.generated.mbti` — never edit that file by hand.
 
 ## Project Structure
 
-- Root package (`./`): HTTP driver.
-  - `clickhouse-driver.mbt` — implementation (HTTP request building, TSV
-    parsing, LZ4 response decompression, connection pool, parameter binding).
+- Root package (`./`): HTTP driver, split by responsibility.
+  - `clickhouse-driver.mbt` — package overview, `Connection` config struct,
+    `connect` / `close` / `cancel`.
+  - `connection.mbt` — SQL API (`ping` / `execute_query` / `execute` /
+    `execute_stream` / `insert`) plus request orchestration.
+  - `http.mbt` — URL building, Basic auth, HTTP round-trip, body reading.
+  - `pool.mbt` — `ConnectionPool` (acquire / release / discard, idle probe).
+  - `cursor.mbt` — streaming `ResultSetCursor`.
+  - `types.mbt` — `Column` / `Row` / `ResultSet` / `InsertFormat`.
+  - `errors.mbt` — `DbError` + HTTP error-body parsing (`Code: N.`).
+  - `tsv.mbt` — TSV response parsing and insert row encoding
+    (TSV / JSONEachRow).
+  - `lz4.mbt` — ClickHouse LZ4 response decompression.
+  - `text.mbt` — low-level UTF-8/string helpers.
   - `clickhouse-driver_test.mbt` — blackbox tests (external API only).
     **Currently a placeholder; add real blackbox coverage here.**
   - `clickhouse-driver_wbtest.mbt` — whitebox tests for parsing/encoding
     internals.
   - `moon.pkg` — package dependencies.
+- `internal/` — shared parameter-binding helpers (`bind_positional` /
+  `apply_default_types`) used by the root and native packages. Package-private
+  by convention; not part of the documented public API.
 - `native/` — native TCP protocol driver, split by protocol layer:
   - `native.mbt` — public API (`NativeConfig` / `NativeConnection`).
   - `protocol.mbt` — packet types, revision constants, VarUInt / fixed-width
@@ -89,13 +103,12 @@ in its generated `pkg.generated.mbti` — never edit that file by hand.
 - Keep deprecated blocks in `deprecated.mbt` in each directory.
 - Document every public API block with a `///|` doc comment so `moon info` and
   generated docs stay accurate.
-- New code belongs in a file that matches its responsibility. The HTTP
-  implementation is currently one large file; splitting it into focused files
-  (`http.mbt`, `pool.mbt`, `params.mbt`, `tsv.mbt`, `lz4.mbt`, ...) is welcome
-  and safe because files in a package share one namespace.
-- The native package is the reference for layering: one protocol concern per
-  file, package-private protocol primitives, `priv` structs unless a type is
-  part of the public API.
+- New code belongs in a file that matches its responsibility. Files inside a
+  package share one namespace, so moving blocks between them is safe and does
+  not change the public API.
+- Keep protocol/encoding primitives package-private (`fn` instead of `pub`)
+  unless another package genuinely needs them; cross-package helpers belong in
+  `internal/`.
 
 ## Known limitations / gotchas
 

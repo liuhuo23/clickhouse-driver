@@ -79,10 +79,7 @@ fn lz4_decompress(src : Bytes, expected : Int32) -> Bytes raise {
 ///|
 /// 读取一个压缩块并解压，返回原始字节。
 /// `compression=false` 时直接原样读取（供非压缩模式复用）。
-pub async fn[R : @io.Reader] read_payload(
-  reader : R,
-  compression : Bool,
-) -> Bytes {
+async fn[R : @io.Reader] read_payload(reader : R, compression : Bool) -> Bytes {
   if !compression {
     return read_string_bytes(reader)
   }
@@ -144,7 +141,7 @@ fn lz4_compress_literals(data : Bytes) -> Bytes {
 ///|
 /// 构造 C++ 格式压缩块并写入 buf：
 ///   checksum(16B) + method(1B) + comp_size(4B LE) + uncomp_size(4B LE) + LZ4 数据
-pub fn write_compressed_block(buf : Buffer, payload : Bytes) -> Unit {
+fn write_compressed_block(buf : Buffer, payload : Bytes) -> Unit {
   let lz = lz4_compress_literals(payload)
   let body = Buffer::Buffer(size_hint=9 + lz.length())
   body.write_byte(0x82) // LZ4

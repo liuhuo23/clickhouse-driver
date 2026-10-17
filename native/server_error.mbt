@@ -6,7 +6,7 @@
 
 ///|
 /// 从 reader 读取 Exception 包并映射为 `@lib.DbError::ServerError`。
-pub async fn[R : @io.Reader] read_exception(reader : R) -> @lib.DbError {
+async fn[R : @io.Reader] read_exception(reader : R) -> @lib.DbError {
   let code_bytes = reader.read_exactly(4)
   let (code, _) = decode_int32(code_bytes, 0)
   let name = read_string(reader)

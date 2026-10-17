@@ -228,7 +228,7 @@ fn cityhash128_with_seed(
 /// 计算 CityHash128（ClickHouse CityHash_v1_0_2 入口），返回 (low64, high64)。
 /// 注意入口 seed 含 k3；len 8-15 有独立分支（monoid 第三方移植在此处有误，
 /// 以 ClickHouse C 源码为准）。
-pub fn city_hash128(bytes : Bytes) -> (UInt64, UInt64) {
+fn city_hash128(bytes : Bytes) -> (UInt64, UInt64) {
   let len = bytes.length()
   if len >= 16 {
     cityhash128_with_seed(

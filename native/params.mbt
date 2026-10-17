@@ -40,6 +40,9 @@ pub async fn NativeConnection::execute(
   sql : String,
   values : Array[String],
 ) -> @lib.ResultSet {
-  let (processed_sql, param_map) = @lib.bind_positional(sql, values)
-  self.execute_query(@lib.apply_default_types(processed_sql), params=param_map)
+  let (processed_sql, param_map) = @internal.bind_positional(sql, values)
+  self.execute_query(
+    @internal.apply_default_types(processed_sql),
+    params=param_map,
+  )
 }

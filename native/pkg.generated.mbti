@@ -3,44 +3,12 @@ package "liuhuo23/clickhouse-driver/native"
 
 import {
   "liuhuo23/clickhouse-driver",
-  "moonbitlang/async/io",
-  "moonbitlang/core/buffer",
 }
 
 // Values
-pub fn city_hash128(Bytes) -> (UInt64, UInt64)
-
 pub async fn connect(NativeConfig) -> NativeConnection
 
-pub async fn[W : @io.Writer] flush_bytes(W, Bytes) -> Unit
-
 pub fn native_config(host~ : String, port? : Int, user~ : String, password~ : String, database? : String, client_name? : String, timeout_ms? : Int, compress? : Bool) -> NativeConfig
-
-pub async fn[R : @io.Reader] read_exception(R) -> @clickhouse-driver.DbError
-
-pub async fn[R : @io.Reader] read_float32(R) -> Float
-
-pub async fn[R : @io.Reader] read_float64(R) -> Double
-
-pub async fn[R : @io.Reader] read_int32(R) -> Int
-
-pub async fn[R : @io.Reader] read_int64(R) -> Int64
-
-pub async fn[R : @io.Reader] read_payload(R, Bool) -> Bytes
-
-pub async fn[R : @io.Reader] read_server_hello(R) -> ServerHello
-
-pub async fn[R : @io.Reader] read_string(R) -> String
-
-pub async fn[R : @io.Reader] read_uint16(R) -> UInt16
-
-pub async fn[R : @io.Reader] read_uint32(R) -> UInt
-
-pub async fn[R : @io.Reader] read_uint64(R) -> UInt64
-
-pub async fn[R : @io.Reader] read_varuint(R) -> UInt64
-
-pub fn write_compressed_block(@buffer.Buffer, Bytes) -> Unit
 
 // Errors
 

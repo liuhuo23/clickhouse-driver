@@ -234,7 +234,7 @@ fn decode_float64(bytes : Bytes, offset : Int32) -> (Double, Int32) raise {
 
 ///|
 /// 从 reader 读取一个 VarUInt（逐字节收集后交给纯函数解析）。
-pub async fn[R : @io.Reader] read_varuint(reader : R) -> UInt64 {
+async fn[R : @io.Reader] read_varuint(reader : R) -> UInt64 {
   let buf = Buffer::Buffer()
   while true {
     let b = reader.read_exactly(1)
@@ -253,7 +253,7 @@ pub async fn[R : @io.Reader] read_varuint(reader : R) -> UInt64 {
 
 ///|
 /// 从 reader 读取带长度前缀的字符串。
-pub async fn[R : @io.Reader] read_string(reader : R) -> String {
+async fn[R : @io.Reader] read_string(reader : R) -> String {
   let len = read_varuint(reader)
   if len > 0x40000000 {
     raise @lib.DbError::connection_error("string too long: \{len} bytes")
@@ -264,7 +264,7 @@ pub async fn[R : @io.Reader] read_string(reader : R) -> String {
 
 ///|
 /// 从 reader 读取 16 位小端无符号整数。
-pub async fn[R : @io.Reader] read_uint16(reader : R) -> UInt16 {
+async fn[R : @io.Reader] read_uint16(reader : R) -> UInt16 {
   let bytes = reader.read_exactly(2)
   let (v, _) = decode_uint16(bytes, 0)
   v
@@ -272,7 +272,7 @@ pub async fn[R : @io.Reader] read_uint16(reader : R) -> UInt16 {
 
 ///|
 /// 从 reader 读取 32 位小端无符号整数。
-pub async fn[R : @io.Reader] read_uint32(reader : R) -> UInt32 {
+async fn[R : @io.Reader] read_uint32(reader : R) -> UInt32 {
   let bytes = reader.read_exactly(4)
   let (v, _) = decode_uint32(bytes, 0)
   v
@@ -280,7 +280,7 @@ pub async fn[R : @io.Reader] read_uint32(reader : R) -> UInt32 {
 
 ///|
 /// 从 reader 读取 32 位小端有符号整数。
-pub async fn[R : @io.Reader] read_int32(reader : R) -> Int32 {
+async fn[R : @io.Reader] read_int32(reader : R) -> Int32 {
   let bytes = reader.read_exactly(4)
   let (v, _) = decode_int32(bytes, 0)
   v
@@ -288,7 +288,7 @@ pub async fn[R : @io.Reader] read_int32(reader : R) -> Int32 {
 
 ///|
 /// 从 reader 读取 64 位小端无符号整数。
-pub async fn[R : @io.Reader] read_uint64(reader : R) -> UInt64 {
+async fn[R : @io.Reader] read_uint64(reader : R) -> UInt64 {
   let bytes = reader.read_exactly(8)
   let (v, _) = decode_uint64(bytes, 0)
   v
@@ -296,7 +296,7 @@ pub async fn[R : @io.Reader] read_uint64(reader : R) -> UInt64 {
 
 ///|
 /// 从 reader 读取 64 位小端有符号整数。
-pub async fn[R : @io.Reader] read_int64(reader : R) -> Int64 {
+async fn[R : @io.Reader] read_int64(reader : R) -> Int64 {
   let bytes = reader.read_exactly(8)
   let (v, _) = decode_int64(bytes, 0)
   v
@@ -304,7 +304,7 @@ pub async fn[R : @io.Reader] read_int64(reader : R) -> Int64 {
 
 ///|
 /// 从 reader 读取 32 位小端单精度浮点。
-pub async fn[R : @io.Reader] read_float32(reader : R) -> Float {
+async fn[R : @io.Reader] read_float32(reader : R) -> Float {
   let bytes = reader.read_exactly(4)
   let (v, _) = decode_float32(bytes, 0)
   v
@@ -312,7 +312,7 @@ pub async fn[R : @io.Reader] read_float32(reader : R) -> Float {
 
 ///|
 /// 从 reader 读取 64 位小端双精度浮点。
-pub async fn[R : @io.Reader] read_float64(reader : R) -> Double {
+async fn[R : @io.Reader] read_float64(reader : R) -> Double {
   let bytes = reader.read_exactly(8)
   let (v, _) = decode_float64(bytes, 0)
   v
@@ -322,7 +322,7 @@ pub async fn[R : @io.Reader] read_float64(reader : R) -> Double {
 
 ///|
 /// 将 `Buffer` 内容一次性完整写入 writer；部分写失败抛 `ConnectionError`。
-pub async fn[W : @io.Writer] flush_bytes(writer : W, bytes : Bytes) -> Unit {
+async fn[W : @io.Writer] flush_bytes(writer : W, bytes : Bytes) -> Unit {
   let mut written = 0
   while written < bytes.length() {
     let n = writer.write_once(

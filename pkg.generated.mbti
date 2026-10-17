@@ -6,10 +6,6 @@ import {
 }
 
 // Values
-pub fn apply_default_types(String) -> String
-
-pub fn bind_positional(String, Array[String]) -> (String, Map[String, String])
-
 pub fn connect(host~ : String, port~ : Int, user~ : String, password~ : String, database~ : String, client_name~ : String, timeout_ms? : Int, https? : Bool, skip_verify? : Bool, compress? : Bool) -> Connection
 
 // Errors
