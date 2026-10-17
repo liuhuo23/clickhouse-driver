@@ -12,3 +12,5 @@ docs/*
 !docs/native-protocol-design.md
 .pi/
 .pi-mind/
+# Local contest submission draft (not part of the published package)
+apply.md

@@ -35,22 +35,18 @@ MoonBit 实现的 ClickHouse **HTTP** 协议驱动——简单、无状态，当
 
 ## 安装
 
-在 `moon.mod` 中添加依赖：
+在 `moon.mod` 中添加依赖（或执行 `moon add liuhuo23/clickhouse-driver`）：
 
 ```text
 import {
-  "moonbitlang/async@0.20.1",
+  "liuhuo23/clickhouse-driver@0.4.0",
 }
 ```
 
-在包的 `moon.pkg` 中添加：
+在包的 `moon.pkg` 中引入：
 
 ```text
 import {
-  "moonbitlang/async/http",
-  "moonbitlang/core/buffer",
-  "moonbitlang/core/encoding/base64",
-  "moonbitlang/core/encoding/utf8",
   "liuhuo23/clickhouse-driver" @lib,
 }
 ```

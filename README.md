@@ -53,22 +53,19 @@ support is ready.
 
 ## Installation
 
-Add the dependency to your `moon.mod`:
+Add the dependency to your `moon.mod` (or run
+`moon add liuhuo23/clickhouse-driver`):
 
 ```text
 import {
-  "moonbitlang/async@0.20.1",
+  "liuhuo23/clickhouse-driver@0.4.0",
 }
 ```
 
-Then in your package's `moon.pkg`:
+Then import it in your package's `moon.pkg`:
 
 ```text
 import {
-  "moonbitlang/async/http",
-  "moonbitlang/core/buffer",
-  "moonbitlang/core/encoding/base64",
-  "moonbitlang/core/encoding/utf8",
   "liuhuo23/clickhouse-driver" @lib,
 }
 ```
