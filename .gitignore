@@ -6,7 +6,9 @@ target
 .moonagent/
 .codewhale/
 .deepseek/
-docs/
-scripts/
+# Design docs referenced from README are tracked; PDFs/report artifacts and
+# local planning notes stay untracked.
+docs/*
+!docs/native-protocol-design.md
 .pi/
 .pi-mind/

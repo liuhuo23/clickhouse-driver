@@ -111,7 +111,8 @@ sub-package. It speaks the same binary protocol as `clickhouse-client`:
 - **Aligned API**: reuses the root package's `DbError` / `ResultSet` /
   `Column` / `Row` types, so migrating call sites is trivial.
 
-Current capabilities: connect + handshake, `ping`, `execute_query` /
+Current capabilities: connect + handshake, per-operation `timeout_ms`,
+`ping`, `execute_query` /
 `execute` (named `{name: Type}` and positional `?` parameter binding),
 `execute_stream` (lazy block-by-block cursor), `insert` (batch Data-block
 upload) and `cancel`, with rich type support: UInt8–64, Int8–64, Float32/64,
@@ -216,12 +217,12 @@ connections (see [Connection pooling](#connection-pooling)).
 ///|
 pub struct Connection {
   host : String
-  port : Int
+  port : Int32
   user : String
   password : String
   database : String
   client_name : String
-  timeout_ms : Int
+  timeout_ms : Int32
   https : Bool
   skip_verify : Bool
   compress : Bool
@@ -353,6 +354,9 @@ defer cur.close()                                        // connection on close
 
 - `size` bounds concurrent connections; extra requests wait for a free one.
 - Connections that fail are discarded and replaced, never reused.
+- Idle connections are reused immediately; ones idle for more than 5s are
+  validated with `GET /ping` before reuse, so a keep-alive socket closed by
+  the server does not surface as a request failure.
 - `pool.execute_stream` returns its connection when the stream is fully
   drained; an abandoned stream drops the connection instead.
 - `pool.close()` closes idle connections; in-flight ones are closed on return.
@@ -467,7 +471,7 @@ try {
 ```moonbit nocheck
 ///|
 pub suberror DbError {
-  ServerError(code~ : Int, name~ : String, message~ : String)
+  ServerError(code~ : Int32, name~ : String, message~ : String)
   ConnectionError(String)
 } derive(Show)
 ```

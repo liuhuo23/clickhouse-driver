@@ -120,7 +120,7 @@ async fn main {
 - **API 对齐**：复用根包的 `DbError` / `ResultSet` / `Column` / `Row` 类型，
   调用方迁移成本极低。
 
-当前能力：连接 + 握手、`ping`、`execute_query` / `execute`（命名 `{name: Type}`
+当前能力：连接 + 握手、按操作生效的 `timeout_ms`、`ping`、`execute_query` / `execute`（命名 `{name: Type}`
 与位置 `?` 参数绑定）、`execute_stream`（惰性逐块游标）、`insert`（批量 Data
 块上传）与 `cancel`，类型支持丰富：UInt8–64、Int8–64、Float32/64、String、
 FixedString、Date、Date32、DateTime、DateTime64、Enum8/16、Nullable、Array
@@ -367,6 +367,8 @@ defer cur.close()                                        // 归还连接
 
 - `size` 限制并发连接数；超过时请求排队等待空闲连接
 - 出错的连接会被丢弃重建，绝不回池复用
+- 空闲超过 5s 的连接在复用前先用 `GET /ping` 探活，避免服务端已关闭的
+  keep-alive 连接变成用户可见的请求失败
 - `pool.execute_stream` 完全读完后归还连接；中途放弃则丢弃连接
 - `pool.close()` 关闭空闲连接；使用中的连接归还时关闭
 

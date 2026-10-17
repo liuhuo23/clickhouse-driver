@@ -23,10 +23,15 @@ jobs:
       - name: moon check
         run: moon check --target native
 
-      - name: moon test (unit)
+      # `-p <root>` does not include subpackages, so run both explicitly.
+      - name: moon test (unit, HTTP driver)
         run: moon test -p liuhuo23/clickhouse-driver --target native
+
+      - name: moon test (unit, native driver)
+        run: moon test -p liuhuo23/clickhouse-driver/native --target native
 
       - name: lint
         run: |
-          moon fmt && git diff --exit-code
-          moon info && git diff --exit-code
+          moon fmt --check
+          moon info
+          git diff --exit-code

@@ -457,6 +457,9 @@ defer cur.close()                                        // connection on close
 
 - `size` bounds concurrent connections; extra requests wait for a free one.
 - Connections that fail are discarded and replaced, never reused.
+- Idle connections are reused immediately; ones idle for more than 5s are
+  validated with `GET /ping` before reuse, so a keep-alive socket closed by
+  the server does not surface as a request failure.
 - `pool.execute_stream` returns its connection when the stream is fully
   drained; an abandoned stream drops the connection instead.
 - `pool.close()` closes idle connections; in-flight ones are closed on return.
