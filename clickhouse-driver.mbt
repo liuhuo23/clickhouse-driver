@@ -74,7 +74,7 @@ pub(all) enum InsertFormat {
 pub struct ResultSetCursor {
   priv client : @http.Client
   priv cols : Array[Column]
-  priv timeout_ms : Int
+  priv timeout_ms : Int32
   /// Owning pool (if streamed through a `ConnectionPool`); `None` means the
   /// cursor owns its connection directly.
   priv pool : ConnectionPool?
@@ -162,22 +162,38 @@ pub fn ResultSetCursor::close(self : ResultSetCursor) -> Unit {
 /// only touched inside short synchronous sections — no locking is needed.
 /// Requests beyond `max_size` wait for a free connection; connections that
 /// fail are discarded and replaced, never handed back to the pool.
+
+///|
+/// Idle connections older than this are health-checked with `GET /ping`
+/// before reuse, so a keep-alive socket closed by the server/proxy does not
+/// surface as a user-visible failure.
+const IDLE_HEALTH_CHECK_MS : UInt64 = 5000
+
+///|
+/// An idle keep-alive connection plus the millisecond timestamp when it was
+/// returned to the pool.
+priv struct IdleClient {
+  client : @http.Client
+  since : UInt64
+}
+
+///|
 pub struct ConnectionPool {
   priv host : String
-  priv port : Int
+  priv port : Int32
   priv user : String
   priv password : String
   priv database : String
   priv client_name : String
-  priv timeout_ms : Int
+  priv timeout_ms : Int32
   priv https : Bool
   priv skip_verify : Bool
   priv compress : Bool
-  priv max_size : Int
+  priv max_size : Int32
   /// Bounds concurrent checked-out connections (permits == max_size).
   priv sem : @async.Semaphore
-  /// Idle keep-alive connections ready for reuse.
-  priv idle : Array[@http.Client]
+  /// Idle keep-alive connections ready for reuse (with idle timestamps).
+  priv idle : Array[IdleClient]
   /// Set by `close()`; further operations close connections instead of
   /// reusing them.
   priv mut closed : Bool
@@ -187,12 +203,12 @@ pub struct ConnectionPool {
 /// Build a `ConnectionPool` from this connection config.
 /// `size` is the maximum number of concurrent connections (default 4;
 /// values <= 0 are clamped to 4).
-pub fn Connection::pool(self : Connection, size? : Int = 4) -> ConnectionPool {
+pub fn Connection::pool(self : Connection, size~ : Int32 = 4) -> ConnectionPool {
   ConnectionPool::new(self, size)
 }
 
 ///|
-fn ConnectionPool::new(conn : Connection, size : Int) -> ConnectionPool {
+fn ConnectionPool::new(conn : Connection, size : Int32) -> ConnectionPool {
   let size = if size <= 0 { 4 } else { size }
   {
     host: conn.host,
@@ -224,28 +240,24 @@ pub fn ConnectionPool::cancel(self : ConnectionPool) -> Unit {
 /// Connections still checked out are closed when they are returned.
 pub fn ConnectionPool::close(self : ConnectionPool) -> Unit {
   self.closed = true
-  for client in self.idle {
-    client.close()
+  for entry in self.idle {
+    entry.client.close()
   }
   self.idle.clear()
 }
 
 ///|
 /// The maximum number of concurrent connections this pool will create.
-pub fn ConnectionPool::max_size(self : ConnectionPool) -> Int {
+pub fn ConnectionPool::max_size(self : ConnectionPool) -> Int32 {
   self.max_size
 }
 
 ///|
 /// Round-trip health check through the pool.
 pub async fn ConnectionPool::ping(self : ConnectionPool) -> Unit {
-  let (status, body) = self.pool_http_request("SELECT 1", Map([]))
+  let (status, headers, body) = self.pool_http_request("SELECT 1", Map([]))
   if status != 200 {
-    raise ServerError(
-      code=status,
-      name="HTTPError",
-      message=extract_error(body),
-    )
+    raise http_error(status, headers, body)
   }
 }
 
@@ -255,7 +267,7 @@ pub async fn ConnectionPool::ping(self : ConnectionPool) -> Unit {
 pub async fn ConnectionPool::execute_query(
   self : ConnectionPool,
   sql : String,
-  params? : Map[String, String] = Map([]),
+  params~ : Map[String, String] = Map([]),
 ) -> ResultSet {
   self.do_request(apply_default_types(sql), params)
 }
@@ -278,7 +290,7 @@ pub async fn ConnectionPool::insert(
   table : String,
   columns : Array[String],
   rows : Array[Array[String]],
-  format? : InsertFormat = Tsv,
+  format~ : InsertFormat = Tsv,
 ) -> Unit {
   let sql = build_insert_sql(table, columns, format)
   let conn = self.as_connection()
@@ -295,7 +307,7 @@ pub async fn ConnectionPool::insert(
 pub async fn ConnectionPool::execute_stream(
   self : ConnectionPool,
   sql : String,
-  params? : Map[String, String] = Map([]),
+  params~ : Map[String, String] = Map([]),
 ) -> ResultSetCursor {
   guard !self.compress else {
     raise ConnectionError(
@@ -314,13 +326,9 @@ async fn ConnectionPool::do_request(
   sql : String,
   params : Map[String, String],
 ) -> ResultSet {
-  let (status, body) = self.pool_http_request(sql, params)
+  let (status, headers, body) = self.pool_http_request(sql, params)
   if status != 200 {
-    raise ServerError(
-      code=status,
-      name="HTTPError",
-      message=extract_error(body),
-    )
+    raise http_error(status, headers, body)
   }
   parse_tsv_response(body)
 }
@@ -331,7 +339,7 @@ async fn ConnectionPool::pool_http_request(
   self : ConnectionPool,
   query : String,
   params : Map[String, String],
-) -> (Int, String) {
+) -> (Int32, Map[String, String], String) {
   self
   .as_connection()
   .run_with_timeout(() => self.pool_http_request_impl(query, params))
@@ -343,25 +351,16 @@ async fn ConnectionPool::pool_http_request_impl(
   self : ConnectionPool,
   query : String,
   params : Map[String, String],
-) -> (Int, String) {
+) -> (Int32, Map[String, String], String) {
   let conn = self.as_connection()
   let path = build_url(conn, query, params)
   let client = self.acquire()
+  errdefer self.discard(client)
   let body_bytes : Bytes = b""
   let body_data : &@io.Data = body_bytes
-  let response = client.post(path, body_data) catch {
-    err => {
-      self.discard(client)
-      raise err
-    }
-  }
+  let response = client.post(path, body_data)
   let status = response.code
-  let raw = read_response_bytes(client) catch {
-    err => {
-      self.discard(client)
-      raise err
-    }
-  }
+  let raw = read_response_bytes(client)
   self.release(client)
   let body = if self.compress {
     decompress_clickhouse_body(raw) catch {
@@ -370,28 +369,51 @@ async fn ConnectionPool::pool_http_request_impl(
   } else {
     raw
   }
-  (status, @utf8.decode_lossy(body))
+  (status, response.headers, @utf8.decode_lossy(body))
 }
 
 ///|
 /// Borrow a connection: reuse an idle one, create a new one (up to
-/// `max_size`), or wait until one is returned. Broken connections are never
-/// cached — callers use `discard` on failure.
+/// `max_size`), or wait until one is returned. Idle sockets that have been
+/// sitting longer than `IDLE_HEALTH_CHECK_MS` are validated first; broken
+/// connections are never cached — callers use `discard` on failure.
 async fn ConnectionPool::acquire(self : ConnectionPool) -> @http.Client {
   self.sem.acquire()
   if self.closed {
     self.sem.release()
     raise ConnectionError("connection pool is closed")
   }
-  match self.idle.pop() {
-    Some(client) => client
-    None =>
-      self.as_connection().open_client() catch {
-        err => {
-          self.sem.release()
-          raise err
-        }
-      }
+  let now = @env.now()
+  while self.idle.length() > 0 {
+    let entry = self.idle.pop().unwrap()
+    // Fresh enough to trust without a round trip.
+    if now < entry.since + IDLE_HEALTH_CHECK_MS {
+      return entry.client
+    }
+    if self.is_alive(entry.client) {
+      return entry.client
+    }
+    entry.client.close()
+  }
+  errdefer self.sem.release()
+  self.as_connection().open_client()
+}
+
+///|
+/// Cheap `GET /ping` probe; drains the body so the socket stays reusable.
+/// Any I/O error or non-200 status means the connection must be dropped.
+async fn ConnectionPool::is_alive(
+  self : ConnectionPool,
+  client : @http.Client,
+) -> Bool {
+  ignore(self)
+  try {
+    let response = client.get("/ping")
+    let code = response.code
+    ignore(read_response_bytes(client))
+    code == 200
+  } catch {
+    _ => false
   }
 }
 
@@ -404,7 +426,7 @@ fn ConnectionPool::release(
   if self.closed {
     client.close()
   } else {
-    self.idle.push(client)
+    self.idle.push({ client, since: @env.now(), })
   }
   self.sem.release()
 }
@@ -446,29 +468,18 @@ async fn ConnectionPool::insert_impl(
   format : InsertFormat,
 ) -> Unit {
   let client = self.acquire()
-  let status = try {
-    client.request(@http.RequestMethod::Post, path)
-    for row in rows {
-      let row_bytes = encode_row(columns, row, format)
-      let row_data : &@io.Data = row_bytes
-      client.write(row_data)
-    }
-    client.flush()
-    client.end_request().code
-  } catch {
-    err => {
-      self.discard(client)
-      raise err
-    }
+  errdefer self.discard(client)
+  client.request(@http.RequestMethod::Post, path)
+  for row in rows {
+    let row_bytes = encode_row(columns, row, format)
+    let row_data : &@io.Data = row_bytes
+    client.write(row_data)
   }
-  if status != 200 {
+  client.flush()
+  let response = client.end_request()
+  if response.code != 200 {
     let body = read_response_body(client)
-    self.discard(client)
-    raise ServerError(
-      code=status,
-      name="HTTPError",
-      message=extract_error(body),
-    )
+    raise http_error(response.code, response.headers, body)
   }
   self.release(client)
 }
@@ -483,35 +494,20 @@ async fn ConnectionPool::execute_stream_impl(
   let conn = self.as_connection()
   let path = build_url(conn, sql, params)
   let client = self.acquire()
+  errdefer self.discard(client)
   let body_bytes : Bytes = b""
   let body_data : &@io.Data = body_bytes
-  let response = client.post(path, body_data) catch {
-    err => {
-      self.discard(client)
-      raise err
-    }
-  }
+  let response = client.post(path, body_data)
   if response.code != 200 {
     let body = read_response_body(client)
-    self.discard(client)
-    raise ServerError(
-      code=response.code,
-      name="HTTPError",
-      message=extract_error(body),
-    )
+    raise http_error(response.code, response.headers, body)
   }
   let names_line = match client.read_until("\n") {
-    None => {
-      self.discard(client)
-      raise ConnectionError("empty response from server")
-    }
+    None => raise ConnectionError("empty response from server")
     Some(line) => strip_cr(line)
   }
   let types_line = match client.read_until("\n") {
-    None => {
-      self.discard(client)
-      raise ConnectionError("missing type header from server")
-    }
+    None => raise ConnectionError("missing type header from server")
     Some(line) => strip_cr(line)
   }
   let names = split_tsv_line(names_line)
@@ -519,7 +515,7 @@ async fn ConnectionPool::execute_stream_impl(
   let cols : Array[Column] = []
   for i in 0..<names.length() {
     let typ = if i < types.length() { types[i] } else { "" }
-    cols.push({ name: names[i], type_: typ })
+    cols.push({ name: names[i], type_: typ, })
   }
   {
     client,
@@ -535,16 +531,24 @@ async fn ConnectionPool::execute_stream_impl(
 ///|
 /// Errors raised by the driver.
 pub suberror DbError {
-  /// Server returned a non-2xx HTTP response with an error body.
-  ServerError(code~ : Int, name~ : String, message~ : String)
+  /// Server rejected the request. `code` is ClickHouse's exception code
+  /// (`Code: N.` / `X-ClickHouse-Exception-Code`) when the server reported
+  /// one, otherwise the HTTP status; `name` is `"DB::Exception"` or
+  /// `"HTTPError"` accordingly.
+  ServerError(code~ : Int32, name~ : String, message~ : String)
   /// Connection-level error (I/O, malformed response, unexpected EOF)
   ConnectionError(String)
 } derive(Debug)
 
 ///|
+/// Re-export the derived `Debug` method explicitly (MoonBit no longer
+/// promotes trait impl methods to inherent methods implicitly).
+pub extend DbError with @debug.Debug::{to_repr}
+
+///|
 /// 构造服务器错误（供 native 等子包复用）。
 pub fn DbError::server_error(
-  code~ : Int,
+  code~ : Int32,
   name~ : String,
   message~ : String,
 ) -> DbError {
@@ -564,13 +568,13 @@ pub fn DbError::connection_error(message : String) -> DbError {
 /// Each query opens its own short-lived HTTP connection.
 pub struct Connection {
   host : String
-  port : Int
+  port : Int32
   user : String
   password : String
   database : String
   client_name : String
   /// Per-request timeout in milliseconds; `0` (default) means no timeout.
-  timeout_ms : Int
+  timeout_ms : Int32
   /// Use `https://` instead of `http://` (TLS).
   https : Bool
   /// Skip TLS certificate verification (only meaningful when `https=true`).
@@ -593,15 +597,15 @@ pub struct Connection {
 ///   compress   — request ClickHouse LZ4 response compression; default false
 pub fn connect(
   host~ : String,
-  port~ : Int,
+  port~ : Int32,
   user~ : String,
   password~ : String,
   database~ : String,
   client_name~ : String,
-  timeout_ms? : Int = 0,
-  https? : Bool = false,
-  skip_verify? : Bool = false,
-  compress? : Bool = false,
+  timeout_ms~ : Int32 = 0,
+  https~ : Bool = false,
+  skip_verify~ : Bool = false,
+  compress~ : Bool = false,
 ) -> Connection {
   {
     host,
@@ -632,13 +636,9 @@ pub fn Connection::cancel(self : Connection) -> Unit {
 ///|
 /// Round-trip health check: sends `SELECT 1` and expects 200 OK.
 pub async fn Connection::ping(self : Connection) -> Unit {
-  let (status, body) = self.http_request("SELECT 1", Map([]))
+  let (status, headers, body) = self.http_request("SELECT 1", Map([]))
   if status != 200 {
-    raise ServerError(
-      code=status,
-      name="HTTPError",
-      message=extract_error(body),
-    )
+    raise http_error(status, headers, body)
   }
 }
 
@@ -663,7 +663,7 @@ pub async fn Connection::ping(self : Connection) -> Unit {
 pub async fn Connection::execute_query(
   self : Connection,
   sql : String,
-  params? : Map[String, String] = Map([]),
+  params~ : Map[String, String] = Map([]),
 ) -> ResultSet {
   self.do_request(apply_default_types(sql), params)
 }
@@ -720,7 +720,7 @@ pub async fn Connection::execute(
 pub async fn Connection::execute_stream(
   self : Connection,
   sql : String,
-  params? : Map[String, String] = Map([]),
+  params~ : Map[String, String] = Map([]),
 ) -> ResultSetCursor {
   guard !self.compress else {
     raise ConnectionError(
@@ -753,7 +753,7 @@ pub async fn Connection::insert(
   table : String,
   columns : Array[String],
   rows : Array[Array[String]],
-  format? : InsertFormat = Tsv,
+  format~ : InsertFormat = Tsv,
 ) -> Unit {
   let sql = build_insert_sql(table, columns, format)
   self.run_with_timeout(() => {
@@ -769,13 +769,9 @@ async fn Connection::do_request(
   sql : String,
   params : Map[String, String],
 ) -> ResultSet {
-  let (status, body) = self.http_request(sql, params)
+  let (status, headers, body) = self.http_request(sql, params)
   if status != 200 {
-    raise ServerError(
-      code=status,
-      name="HTTPError",
-      message=extract_error(body),
-    )
+    raise http_error(status, headers, body)
   }
   parse_tsv_response(body)
 }
@@ -798,13 +794,13 @@ async fn[X] Connection::run_with_timeout(
 }
 
 ///|
-/// Send an HTTP request to ClickHouse and return (status_code, body_text).
-/// Applies the connection-level timeout when configured.
+/// Send an HTTP request to ClickHouse and return (status_code, headers,
+/// body_text). Applies the connection-level timeout when configured.
 async fn Connection::http_request(
   self : Connection,
   query : String,
   params : Map[String, String],
-) -> (Int, String) {
+) -> (Int32, Map[String, String], String) {
   self.run_with_timeout(() => self.http_request_impl(query, params))
 }
 
@@ -814,7 +810,7 @@ async fn Connection::http_request_impl(
   self : Connection,
   query : String,
   params : Map[String, String],
-) -> (Int, String) {
+) -> (Int32, Map[String, String], String) {
   let path = build_url(self, query, params)
   let client = self.open_client()
   // Always use POST with empty body — works for SELECT, DDL, INSERT, etc.
@@ -834,7 +830,7 @@ async fn Connection::http_request_impl(
   } else {
     raw
   }
-  (status, @utf8.decode_lossy(body))
+  (status, response.headers, @utf8.decode_lossy(body))
 }
 
 ///|
@@ -889,11 +885,7 @@ async fn Connection::insert_impl(
   if status != 200 {
     let body = read_response_body(client)
     client.close()
-    raise ServerError(
-      code=status,
-      name="HTTPError",
-      message=extract_error(body),
-    )
+    raise http_error(status, response.headers, body)
   }
   client.close()
 }
@@ -913,11 +905,7 @@ async fn Connection::execute_stream_impl(
   if response.code != 200 {
     let body = read_response_body(client)
     client.close()
-    raise ServerError(
-      code=response.code,
-      name="HTTPError",
-      message=extract_error(body),
-    )
+    raise http_error(response.code, response.headers, body)
   }
   let names_line = match client.read_until("\n") {
     None => {
@@ -938,9 +926,9 @@ async fn Connection::execute_stream_impl(
   let cols : Array[Column] = []
   for i in 0..<names.length() {
     let typ = if i < types.length() { types[i] } else { "" }
-    cols.push({ name: names[i], type_: typ })
+    cols.push({ name: names[i], type_: typ, })
   }
-  { client, cols, timeout_ms: self.timeout_ms, pool: None, exhausted: [false] }
+  { client, cols, timeout_ms: self.timeout_ms, pool: None, exhausted: [false], }
 }
 
 ///|
@@ -1297,7 +1285,7 @@ fn decompress_clickhouse_body(body : Bytes) -> Bytes raise {
 
 ///|
 /// Read a little-endian UInt32 from a byte buffer.
-fn read_le_u32(bytes : Bytes, start : Int) -> Int {
+fn read_le_u32(bytes : Bytes, start : Int32) -> Int32 {
   bytes[start].to_int() |
   (bytes[start + 1].to_int() << 8) |
   (bytes[start + 2].to_int() << 16) |
@@ -1313,9 +1301,9 @@ fn read_le_u32(bytes : Bytes, start : Int) -> Int {
 /// then the match (copied with overlap allowed).
 fn lz4_decompress_block(
   bytes : Bytes,
-  start : Int,
-  len : Int,
-  raw_size : Int,
+  start : Int32,
+  len : Int32,
+  raw_size : Int32,
 ) -> Bytes raise {
   let out = FixedArray::make(raw_size, b'\x00')
   let mut out_len = 0
@@ -1411,6 +1399,60 @@ fn extract_error(body : String) -> String {
   }
 }
 
+///|
+/// Build a `ServerError` from an HTTP error response.
+///
+/// ClickHouse reports the real exception code in the
+/// `X-ClickHouse-Exception-Code` response header and in the body's
+/// `Code: N.` prefix; the HTTP status is only a transport-level fallback.
+fn http_error(
+  status : Int32,
+  headers : Map[String, String],
+  body : String,
+) -> DbError {
+  let message = extract_error(body)
+  let parsed = match headers.get("x-clickhouse-exception-code") {
+    Some(value) =>
+      match parse_leading_int(value) {
+        Some(code) => Some(code)
+        None => parse_clickhouse_error_code(body)
+      }
+    None => parse_clickhouse_error_code(body)
+  }
+  match parsed {
+    Some(code) => ServerError(code~, name="DB::Exception", message~)
+    None => ServerError(code=status, name="HTTPError", message~)
+  }
+}
+
+///|
+/// Parse the `Code: <n>.` prefix of a ClickHouse exception body.
+fn parse_clickhouse_error_code(body : String) -> Int32? {
+  let prefix = "Code: "
+  guard body.has_prefix(prefix) else { return None }
+  parse_leading_int(body[6:].to_owned())
+}
+
+///|
+/// Parse the leading ASCII digits of `s`; `None` when there are none.
+fn parse_leading_int(s : String) -> Int32? {
+  let mut value = 0
+  let mut any = false
+  for c in s {
+    if c >= '0' && c <= '9' {
+      value = value * 10 + (c.to_int() - '0'.to_int())
+      any = true
+    } else {
+      break
+    }
+  }
+  if any {
+    Some(value)
+  } else {
+    None
+  }
+}
+
 // ============ TSV (de)serialization ============
 
 ///|
@@ -1423,14 +1465,14 @@ fn extract_error(body : String) -> String {
 fn parse_tsv_response(body : String) -> ResultSet {
   let lines = split_lines(body)
   if lines.length() < 2 {
-    return { columns: [], rows: [] }
+    return { columns: [], rows: [], }
   }
   let names = split_tsv_line(lines[0])
   let types = split_tsv_line(lines[1])
   let columns : Array[Column] = []
   for i in 0..<names.length() {
     let typ = if i < types.length() { types[i] } else { "" }
-    columns.push({ name: names[i], type_: typ })
+    columns.push({ name: names[i], type_: typ, })
   }
   let rows : Array[Row] = []
   for i in 2..<lines.length() {
@@ -1440,7 +1482,7 @@ fn parse_tsv_response(body : String) -> ResultSet {
       rows.push({ values, })
     }
   }
-  { columns, rows }
+  { columns, rows, }
 }
 
 // ============ URL encoding ============
@@ -1553,7 +1595,7 @@ fn split_tsv_line(line : String) -> Array[String] {
 // ============ Internal byte/string conversion ============
 
 ///|
-fn bytes_to_string(bytes : Bytes, start : Int, end : Int) -> String {
+fn bytes_to_string(bytes : Bytes, start : Int32, end : Int32) -> String {
   let buf = Buffer::Buffer(size_hint=end - start)
   for i in start..<end {
     buf.write_byte(bytes[i])
@@ -1567,7 +1609,7 @@ fn buf_to_string(buf : Buffer) -> String {
 }
 
 ///|
-fn hex_nibble_byte(v : Int) -> Byte {
+fn hex_nibble_byte(v : Int32) -> Byte {
   if v < 10 {
     (v + 0x30).to_byte()
   } else {
@@ -1578,19 +1620,16 @@ fn hex_nibble_byte(v : Int) -> Byte {
 // ============ Generic utilities (kept for backwards compatibility) ============
 
 ///|
-/// Extract a substring [start, end) from a String (byte-indexed).
-fn substr(s : String, start : Int, end : Int) -> String {
+/// Extract a substring `[start, end)` from a String, indexed by UTF-16 code
+/// unit and clamped to valid character boundaries.
+fn substr(s : String, start : Int32, end : Int32) -> String {
   if start >= end || start < 0 {
     return ""
   }
   let s_len = s.length()
   let real_end = if end > s_len { s_len } else { end }
   let real_start = if start > s_len { s_len } else { start }
-  let buf = Buffer::Buffer(size_hint=real_end - real_start)
-  for i in real_start..<real_end {
-    buf.write_byte(s[i].to_int().to_byte())
-  }
-  @utf8.decode_lossy(buf.to_bytes())
+  s[real_start:real_end].to_owned()
 }
 
 // ============ Result set constructors (for sub-packages) ============
@@ -1598,7 +1637,7 @@ fn substr(s : String, start : Int, end : Int) -> String {
 ///|
 /// 构造列元数据（供 native 等子包复用）。
 pub fn Column::new(name~ : String, type_~ : String) -> Column {
-  { name, type_ }
+  { name, type_, }
 }
 
 ///|
@@ -1613,5 +1652,5 @@ pub fn ResultSet::new(
   columns~ : Array[Column],
   rows~ : Array[Row],
 ) -> ResultSet {
-  { columns, rows }
+  { columns, rows, }
 }

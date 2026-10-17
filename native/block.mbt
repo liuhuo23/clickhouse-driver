@@ -52,13 +52,16 @@ async fn[R : @io.Reader] read_block(reader : R) -> BlockData {
       "block dimensions out of range: ncols=\{ncols} nrows=\{nrows}",
     )
   }
-  let headers : Array[ColumnHeader] = Array::make(ncols, { name: "", type_: "" })
+  let headers : Array[ColumnHeader] = Array::make(ncols, {
+    name: "",
+    type_: "",
+  })
   let col_data : Array[Array[String]] = Array::make(ncols, [])
   for c in 0..<ncols {
     let name = read_string(reader)
     let type_ = read_string(reader)
     ignore(reader.read_exactly(1)) // has_custom_serialization (rev >= 54454)
-    headers[c] = { name, type_ }
+    headers[c] = { name, type_, }
     col_data[c] = read_column_values(reader, type_, nrows)
   }
   // 转行优先
@@ -70,7 +73,7 @@ async fn[R : @io.Reader] read_block(reader : R) -> BlockData {
     }
     rows[r] = row
   }
-  { headers, rows }
+  { headers, rows, }
 }
 
 ///|

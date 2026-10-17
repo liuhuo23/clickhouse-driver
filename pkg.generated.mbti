@@ -19,6 +19,7 @@ pub suberror DbError {
 } derive(@debug.Debug)
 pub fn DbError::connection_error(String) -> Self
 pub fn DbError::server_error(code~ : Int, name~ : String, message~ : String) -> Self
+pub fn DbError::to_repr(Self) -> @debug.Repr
 
 // Types and methods
 pub struct Column {

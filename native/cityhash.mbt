@@ -18,7 +18,7 @@ const KMUL : UInt64 = 0x9ddfea08eb382d69
 
 ///|
 /// 循环右移。
-fn rotate(v : UInt64, n : Int) -> UInt64 {
+fn rotate(v : UInt64, n : Int32) -> UInt64 {
   (v >> n) | (v << (64 - n))
 }
 
@@ -42,7 +42,7 @@ fn hash_len16(u : UInt64, v : UInt64) -> UInt64 {
 }
 
 ///|
-fn fetch64(bytes : Bytes, offset : Int) -> UInt64 {
+fn fetch64(bytes : Bytes, offset : Int32) -> UInt64 {
   let mut v : UInt64 = 0
   for i in 0..<8 {
     v = v | (bytes[offset + i].to_uint64() << (i * 8))
@@ -51,8 +51,8 @@ fn fetch64(bytes : Bytes, offset : Int) -> UInt64 {
 }
 
 ///|
-fn fetch32(bytes : Bytes, offset : Int) -> UInt {
-  let mut v : UInt = 0
+fn fetch32(bytes : Bytes, offset : Int32) -> UInt32 {
+  let mut v : UInt32 = 0
   for i in 0..<4 {
     v = v | (bytes[offset + i].to_uint() << (i * 8))
   }
@@ -60,7 +60,7 @@ fn fetch32(bytes : Bytes, offset : Int) -> UInt {
 }
 
 ///|
-fn hash_len0to16(bytes : Bytes, len : Int) -> UInt64 {
+fn hash_len0to16(bytes : Bytes, len : Int32) -> UInt64 {
   if len > 8 {
     let a = fetch64(bytes, 0)
     let b = fetch64(bytes, len - 8)
@@ -104,7 +104,7 @@ fn weak_hash_len32(
 ///|
 fn weak_hash_s(
   bytes : Bytes,
-  offset : Int,
+  offset : Int32,
   a : UInt64,
   b : UInt64,
 ) -> (UInt64, UInt64) {
@@ -121,7 +121,7 @@ fn weak_hash_s(
 ///|
 fn city_murmur(
   bytes : Bytes,
-  len : Int,
+  len : Int32,
   seed_low : UInt64,
   seed_high : UInt64,
 ) -> (UInt64, UInt64) {
@@ -158,7 +158,7 @@ fn city_murmur(
 ///|
 fn cityhash128_with_seed(
   bytes : Bytes,
-  len : Int,
+  len : Int32,
   seed_low : UInt64,
   seed_high : UInt64,
 ) -> (UInt64, UInt64) {
@@ -232,7 +232,7 @@ pub fn city_hash128(bytes : Bytes) -> (UInt64, UInt64) {
   let len = bytes.length()
   if len >= 16 {
     cityhash128_with_seed(
-      bytes.view(start=16, end=len).to_owned(),
+      bytes.exact_view(start=16, end=len).to_owned(),
       len - 16,
       fetch64(bytes, 0) ^ K3,
       fetch64(bytes, 8),

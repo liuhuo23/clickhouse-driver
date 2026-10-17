@@ -3,11 +3,22 @@
 /// 环境变量：CLICKHOUSE_NATIVE_HOST / CLICKHOUSE_NATIVE_PORT（默认 127.0.0.1:39000）。
 
 ///|
-fn native_env() -> (String, Int) {
+fn native_env() -> (String, Int32) {
   let host = @env.get_env_var("CLICKHOUSE_NATIVE_HOST").unwrap_or("127.0.0.1")
   let port = @env.get_env_var("CLICKHOUSE_NATIVE_PORT").unwrap_or("39000")
   let port = parse_int(port, 39000)
   (host, port)
+}
+
+///|
+/// 标准集成凭据：与 HTTP 集成测试共用环境变量，缺省为 docker-compose
+/// 的 default / barn。
+fn native_auth() -> (String, String, String) {
+  (
+    @env.get_env_var("CLICKHOUSE_USER").unwrap_or("default"),
+    @env.get_env_var("CLICKHOUSE_PASSWORD").unwrap_or("barn"),
+    @env.get_env_var("CLICKHOUSE_DATABASE").unwrap_or("default"),
+  )
 }
 
 ///|
@@ -20,14 +31,9 @@ fn require_integration() -> Unit raise {
 ///|
 async fn make_conn() -> @native.NativeConnection {
   let (host, port) = native_env()
+  let (user, password, database) = native_auth()
   @native.connect(
-    @native.native_config(
-      host~,
-      port~,
-      user="default",
-      password="barn",
-      database="default",
-    ),
+    @native.native_config(host~, port~, user~, password~, database~),
   )
 }
 
@@ -466,13 +472,14 @@ async test "native integration: compressed mode" {
   require_integration()
   let (host, port) = native_env()
   let caught = try {
+    let (user, password, database) = native_auth()
     let conn = @native.connect(
       @native.native_config(
         host~,
         port~,
-        user="default",
-        password="barn",
-        database="default",
+        user~,
+        password~,
+        database~,
         compress=true,
       ),
     )
@@ -529,13 +536,10 @@ async test "native integration: compressed mode" {
 async test "native integration: connection pool" {
   require_integration()
   let (host, port) = native_env()
-  let pool = @native.native_config(
-    host~,
-    port~,
-    user="default",
-    password="barn",
-    database="default",
-  ).pool(size=2)
+  let (user, password, database) = native_auth()
+  let pool = @native.native_config(host~, port~, user~, password~, database~).pool(
+    size=2,
+  )
   // 池查询
   let rs = pool.execute_query("SELECT number AS n FROM numbers(3)")
   assert_eq(rs.rows.length(), 3)
@@ -575,13 +579,10 @@ async test "native integration: connection pool" {
 async test "native integration: pool size 1 serial" {
   require_integration()
   let (host, port) = native_env()
-  let pool = @native.native_config(
-    host~,
-    port~,
-    user="default",
-    password="barn",
-    database="default",
-  ).pool(size=1)
+  let (user, password, database) = native_auth()
+  let pool = @native.native_config(host~, port~, user~, password~, database~).pool(
+    size=1,
+  )
   // 单连接串行执行多个查询
   let mut sum = 0
   for i in 0..<10 {
@@ -590,4 +591,30 @@ async test "native integration: pool size 1 serial" {
   }
   assert_eq(sum, 45)
   pool.close()
+}
+
+///|
+async test "native integration: timeout_ms cancels a slow query" {
+  require_integration()
+  let (host, port) = native_env()
+  let (user, password, database) = native_auth()
+  let conn = @native.connect(
+    @native.native_config(
+      host~,
+      port~,
+      user~,
+      password~,
+      database~,
+      timeout_ms=100,
+    ),
+  )
+  let timed_out = try {
+    ignore(conn.execute_query("SELECT sleep(3)"))
+    false
+  } catch {
+    @lib.DbError::ConnectionError(msg) => msg.contains("timed out")
+    _ => false
+  }
+  conn.close()
+  assert_true(timed_out)
 }

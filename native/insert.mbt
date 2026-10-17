@@ -51,7 +51,18 @@ fn build_data_packet(
 /// 流程：发送 Query → 空 Data 块 → 读取服务器 SampleBlock（列头，提供列类型）
 /// → 按列类型编码行数据为 Data 块发送 → 空 Data 块结束 → 读取响应直到结束。
 /// 行值均为字符串表示（与 HTTP 版 `Connection::insert` 对齐），NULL 用空字符串。
+/// 受 `timeout_ms` 约束。
 pub async fn NativeConnection::insert(
+  self : NativeConnection,
+  table : String,
+  columns : Array[String],
+  rows : Array[Array[String]],
+) -> Unit {
+  self.config.with_timeout(() => self.insert_impl(table, columns, rows))
+}
+
+///|
+async fn NativeConnection::insert_impl(
   self : NativeConnection,
   table : String,
   columns : Array[String],

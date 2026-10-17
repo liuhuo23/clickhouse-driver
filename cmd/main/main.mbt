@@ -1,6 +1,6 @@
 ///|
 /// Parse a string as Int (best effort), returning 0 on failure.
-fn parse_int_or(s : String, fallback : Int) -> Int {
+fn parse_int_or(s : String, fallback : Int32) -> Int32 {
   let s = s.trim()
   if s.length() == 0 {
     return fallback

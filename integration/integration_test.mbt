@@ -12,7 +12,7 @@ using @test {assert_eq}
 const TABLE_BASE = "moonbit_drv_it"
 
 ///|
-fn parse_int(s : String, fallback : Int) -> Int {
+fn parse_int(s : String, fallback : Int32) -> Int32 {
   let s = s.trim()
   if s.length() == 0 {
     return fallback
@@ -245,16 +245,10 @@ async test "integration: server error on missing table" {
   let conn = integration_conn()
   defer conn.close()
   try {
-    ignore(
-      conn.execute_query(
-        "SELECT * FROM {tn}",
-        params=Map::from_array([("tn", "system.no_such_table_xyz")]),
-      ),
-    )
+    ignore(conn.execute_query("SELECT * FROM system.no_such_table_xyz"))
     fail("expected ServerError")
   } catch {
-    @lib.DbError::ServerError(code~, name=_, message=_) =>
-      assert_true(code >= 400)
+    @lib.DbError::ServerError(code~, name=_, message=_) => assert_eq(code, 60) // UNKNOWN_TABLE
     _ => fail("expected ServerError")
   }
 }
@@ -267,8 +261,7 @@ async test "integration: server error on syntax error" {
     ignore(conn.execute_query("SLECT 1"))
     fail("expected ServerError")
   } catch {
-    @lib.DbError::ServerError(code~, name=_, message=_) =>
-      assert_true(code >= 400)
+    @lib.DbError::ServerError(code~, name=_, message=_) => assert_eq(code, 62) // SYNTAX_ERROR
     _ => fail("expected ServerError")
   }
 }

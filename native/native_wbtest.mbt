@@ -5,7 +5,7 @@
 ///|
 /// 从 `bytes[offset:]` 解析带长度前缀的字符串，返回 `(值, 新 offset)`。
 /// 仅测试辅助（库代码用异步 `read_string`），保留在 wbtest 中。
-fn decode_string(bytes : Bytes, offset : Int) -> (String, Int) raise {
+fn decode_string(bytes : Bytes, offset : Int32) -> (String, Int32) raise {
   let (len, pos) = decode_varuint(bytes, offset)
   if len > 2147483647 {
     raise @lib.DbError::connection_error("string length out of range")
@@ -15,7 +15,7 @@ fn decode_string(bytes : Bytes, offset : Int) -> (String, Int) raise {
     raise @lib.DbError::connection_error("string length out of range")
   }
   let end = pos + len
-  (@utf8.decode(bytes.view(start=pos, end~)), end)
+  (@utf8.decode(bytes.exact_view(start=pos, end~)), end)
 }
 
 ///|
@@ -78,7 +78,7 @@ test "uint16 roundtrip" {
 
 ///|
 test "uint32 roundtrip" {
-  let cases : Array[UInt] = [
+  let cases : Array[UInt32] = [
     0, 1, 255, 65536, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF,
   ]
   for v in cases {
@@ -622,8 +622,8 @@ test "build_insert_sql and data packet" {
   let sql = build_insert_sql("t", ["a", "b"])
   assert_eq(sql, "INSERT INTO t (a, b) VALUES")
   let headers : Array[ColumnHeader] = [
-    { name: "a", type_: "Int32" },
-    { name: "b", type_: "String" },
+    { name: "a", type_: "Int32", },
+    { name: "b", type_: "String", },
   ]
   let pkt = build_data_packet(headers, [["1", "x"], ["2", "yy"]], false)
   // 包类型 2
@@ -868,7 +868,7 @@ test "nested value formatting" {
 
 ///|
 /// 用 MemoryReader 调用 read_decimal_big。
-async fn read_decimal_big_async(bytes : Bytes, n : Int) -> @bigint.BigInt {
+async fn read_decimal_big_async(bytes : Bytes, n : Int32) -> @bigint.BigInt {
   let reader = @io.MemoryReader::MemoryReader(writer => {
     flush_bytes(writer, bytes)
   })
@@ -1043,7 +1043,7 @@ test "cityhash128 vectors" {
 ///|
 test "cityhash128 full vector check" {
   // len 0..39 与 clickhouse_cityhash 对照（C++ low, high）
-  let expected : Array[(Int, UInt64, UInt64)] = [
+  let expected : Array[(Int32, UInt64, UInt64)] = [
     (0, 0x3df09dfc64c09a2b, 0x3cb540c392e51e29),
     (1, 0xaf63bd6670cfb269, 0x879aef3966e6eed9),
     (2, 0x440a8a39d76709b0, 0xd404c769f5802b60),
@@ -1068,7 +1068,7 @@ test "cityhash128 full vector check" {
     assert_eq(h, ehi)
   }
   // 主路径（len >= 128）
-  let long_cases : Array[(Int, UInt64, UInt64)] = [
+  let long_cases : Array[(Int32, UInt64, UInt64)] = [
     (128, 0x292f5e1651d7427e, 0x1251bc99ab918911),
     (129, 0xcc0219ec07506579, 0xff373dc4b7d980ab),
     (130, 0x1905ef921e7bd5dc, 0x8ea1c8a1ea71c7fa),
@@ -1112,4 +1112,28 @@ test "connection pool config" {
   pool.close()
   pool2.close()
   pool3.close()
+}
+
+///|
+async test "timeout: slow operation raises ConnectionError" {
+  let config = native_config(
+    host="127.0.0.1",
+    timeout_ms=10,
+    user="u",
+    password="p",
+  )
+  let message = try {
+    config.with_timeout(() => @async.sleep(200))
+    ""
+  } catch {
+    @lib.DbError::ConnectionError(msg) => msg
+    _ => "wrong error type"
+  }
+  assert_true(message.contains("timed out"))
+}
+
+///|
+async test "timeout: zero means no timeout" {
+  let config = native_config(host="127.0.0.1", user="u", password="p")
+  config.with_timeout(() => @async.sleep(1))
 }

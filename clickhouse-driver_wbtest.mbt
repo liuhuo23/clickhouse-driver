@@ -6,7 +6,7 @@ using @test {assert_eq}
 
 ///|
 /// Try to parse a string as Int, returning fallback on failure.
-fn parse_int_or(s : String, fallback : Int) -> Int {
+fn parse_int_or(s : String, fallback : Int32) -> Int32 {
   let s = s.trim()
   if s.length() == 0 {
     return fallback
@@ -170,10 +170,10 @@ test "parse_tsv_response: \\r\\n line endings" {
 test "to_map: produces per-row column maps" {
   let rs : ResultSet = {
     columns: [
-      { name: "id", type_: "UInt32" },
-      { name: "name", type_: "String" },
+      { name: "id", type_: "UInt32", },
+      { name: "name", type_: "String", },
     ],
-    rows: [{ values: ["1", "alice"] }, { values: ["2", "bob"] }],
+    rows: [{ values: ["1", "alice"], }, { values: ["2", "bob"], }],
   }
   let maps = rs.to_map()
   assert_eq(maps.length(), 2)
@@ -793,14 +793,14 @@ test "parse_tsv_response: escaped tab in cell value" {
 
 ///|
 test "to_map: empty result set returns empty array" {
-  let rs : ResultSet = { columns: [], rows: [] }
+  let rs : ResultSet = { columns: [], rows: [], }
   let maps = rs.to_map()
   assert_eq(maps.length(), 0)
 }
 
 ///|
 test "to_map: columns with no rows" {
-  let rs : ResultSet = { columns: [{ name: "x", type_: "Int32" }], rows: [] }
+  let rs : ResultSet = { columns: [{ name: "x", type_: "Int32", }], rows: [], }
   let maps = rs.to_map()
   assert_eq(maps.length(), 0)
 }
@@ -809,10 +809,10 @@ test "to_map: columns with no rows" {
 test "to_map: column names with special characters preserved" {
   let rs : ResultSet = {
     columns: [
-      { name: "user_id", type_: "UInt64" },
-      { name: "ts-v2", type_: "DateTime" },
+      { name: "user_id", type_: "UInt64", },
+      { name: "ts-v2", type_: "DateTime", },
     ],
-    rows: [{ values: ["1", "2024-01-01"] }],
+    rows: [{ values: ["1", "2024-01-01"], }],
   }
   let maps = rs.to_map()
   assert_eq(maps.length(), 1)
@@ -824,13 +824,13 @@ test "to_map: column names with special characters preserved" {
 test "to_map: many columns preserved in each row" {
   let cols : Array[Column] = []
   for i in 0..<10 {
-    cols.push({ name: "c\{i}", type_: "String" })
+    cols.push({ name: "c\{i}", type_: "String", })
   }
   let values : Array[String] = []
   for i in 0..<10 {
     values.push("v\{i}")
   }
-  let rs : ResultSet = { columns: cols, rows: [{ values, }] }
+  let rs : ResultSet = { columns: cols, rows: [{ values, }], }
   let maps = rs.to_map()
   assert_eq(maps.length(), 1)
   for i in 0..<10 {
@@ -841,8 +841,8 @@ test "to_map: many columns preserved in each row" {
 ///|
 test "to_map: empty values preserved" {
   let rs : ResultSet = {
-    columns: [{ name: "a", type_: "String" }, { name: "b", type_: "String" }],
-    rows: [{ values: ["", ""] }],
+    columns: [{ name: "a", type_: "String", }, { name: "b", type_: "String", }],
+    rows: [{ values: ["", ""], }],
   }
   let maps = rs.to_map()
   assert_eq(maps[0].get("a"), Some(""))
@@ -1207,9 +1207,9 @@ test "Connection::cancel: is a no-op (does not raise)" {
 ///|
 test "Column and Row and ResultSet struct literals work" {
   // Round-trip a row through a ResultSet and inspect all fields
-  let col : Column = { name: "id", type_: "UInt64" }
-  let row : Row = { values: ["42"] }
-  let rs : ResultSet = { columns: [col], rows: [row] }
+  let col : Column = { name: "id", type_: "UInt64", }
+  let row : Row = { values: ["42"], }
+  let rs : ResultSet = { columns: [col], rows: [row], }
   assert_eq(rs.columns.length(), 1)
   assert_eq(rs.columns[0].name, "id")
   assert_eq(rs.columns[0].type_, "UInt64")
@@ -1257,7 +1257,7 @@ fn hex_to_bytes(hex : String) -> Bytes {
 }
 
 ///|
-fn hex_digit_val(b : Byte) -> Int {
+fn hex_digit_val(b : Byte) -> Int32 {
   let c = b.to_int()
   if c >= '0'.to_int() && c <= '9'.to_int() {
     c - '0'.to_int()
@@ -1275,8 +1275,8 @@ fn hex_digit_val(b : Byte) -> Int {
 /// header (method | comp_size LE | raw_size LE) + payload.
 fn build_compressed_block(
   payload : Bytes,
-  compression : Int,
-  raw_size : Int,
+  compression : Int32,
+  raw_size : Int32,
 ) -> Bytes {
   let buf = Buffer::Buffer(size_hint=16 + 9 + payload.length())
   for _ in 0..<16 {
@@ -1678,4 +1678,63 @@ test "ConnectionPool::close marks closed and clears idle" {
   pool.close()
   assert_eq(pool.closed, true)
   assert_eq(pool.idle.length(), 0)
+}
+
+///|
+test "substr: keeps non-ASCII text intact" {
+  assert_eq(substr("中文abc", 0, 2), "中文")
+  assert_eq(strip_cr("中文\r"), "中文")
+  assert_eq(substr("abc", 5, 9), "")
+}
+
+// ============ http_error mapping ============
+
+///|
+test "http_error: uses ClickHouse code from body prefix" {
+  let err = http_error(
+    404,
+    Map([]),
+    "Code: 60. DB::Exception: Table default.x doesn't exist",
+  )
+  match err {
+    ServerError(code~, name~, message~) => {
+      assert_eq(code, 60)
+      assert_eq(name, "DB::Exception")
+      assert_true(message.contains("Table default.x"))
+    }
+    _ => fail("expected ServerError")
+  }
+}
+
+///|
+test "http_error: header code wins over body" {
+  let headers = Map::from_array([("x-clickhouse-exception-code", "516")])
+  match http_error(500, headers, "no code prefix") {
+    ServerError(code~, name~, ..) => {
+      assert_eq(code, 516)
+      assert_eq(name, "DB::Exception")
+    }
+    _ => fail("expected ServerError")
+  }
+}
+
+///|
+test "http_error: falls back to HTTP status" {
+  match http_error(401, Map([]), "Unauthorized") {
+    ServerError(code~, name~, message~) => {
+      assert_eq(code, 401)
+      assert_eq(name, "HTTPError")
+      assert_eq(message, "Unauthorized")
+    }
+    _ => fail("expected ServerError")
+  }
+}
+
+///|
+test "http_error: malformed header falls back to body/status" {
+  let headers = Map::from_array([("x-clickhouse-exception-code", "oops")])
+  match http_error(400, headers, "Code: 62. DB::Exception: Syntax error") {
+    ServerError(code~, ..) => assert_eq(code, 62)
+    _ => fail("expected ServerError")
+  }
 }

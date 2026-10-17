@@ -10,7 +10,7 @@
 /// 原生连接池。
 pub struct NativeConnectionPool {
   priv config : NativeConfig
-  priv max_size : Int
+  priv max_size : Int32
   priv sem : @async.Semaphore
   priv idle : Array[NativeConnection]
   priv closed : Array[Bool]
@@ -20,7 +20,7 @@ pub struct NativeConnectionPool {
 /// 从连接配置创建连接池。`size` 为最大并发连接数（默认 4，<=0 时按 4）。
 pub fn NativeConfig::pool(
   self : NativeConfig,
-  size? : Int = 4,
+  size~ : Int32 = 4,
 ) -> NativeConnectionPool {
   let size = if size <= 0 { 4 } else { size }
   {
@@ -34,7 +34,7 @@ pub fn NativeConfig::pool(
 
 ///|
 /// 池的最大并发连接数。
-pub fn NativeConnectionPool::max_size(self : NativeConnectionPool) -> Int {
+pub fn NativeConnectionPool::max_size(self : NativeConnectionPool) -> Int32 {
   self.max_size
 }
 
@@ -74,13 +74,8 @@ async fn NativeConnectionPool::acquire(
     conn.close()
   }
   // 新建连接
-  let conn = connect(self.config) catch {
-    err => {
-      self.sem.release()
-      raise err
-    }
-  }
-  conn
+  errdefer self.sem.release()
+  connect(self.config)
 }
 
 ///|
@@ -111,12 +106,8 @@ fn NativeConnectionPool::discard(
 /// 通过池执行健康检查（SELECT 1）。
 pub async fn NativeConnectionPool::ping(self : NativeConnectionPool) -> Unit {
   let conn = self.acquire()
-  let result = conn.ping() catch {
-    err => {
-      self.discard(conn)
-      raise err
-    }
-  }
+  errdefer self.discard(conn)
+  let result = conn.ping()
   self.release(conn)
   result
 }
@@ -126,15 +117,11 @@ pub async fn NativeConnectionPool::ping(self : NativeConnectionPool) -> Unit {
 pub async fn NativeConnectionPool::execute_query(
   self : NativeConnectionPool,
   sql : String,
-  params? : Map[String, String] = Map([]),
+  params~ : Map[String, String] = Map([]),
 ) -> @lib.ResultSet {
   let conn = self.acquire()
-  let result = conn.execute_query(sql, params~) catch {
-    err => {
-      self.discard(conn)
-      raise err
-    }
-  }
+  errdefer self.discard(conn)
+  let result = conn.execute_query(sql, params~)
   self.release(conn)
   result
 }
@@ -159,12 +146,8 @@ pub async fn NativeConnectionPool::insert(
   rows : Array[Array[String]],
 ) -> Unit {
   let conn = self.acquire()
-  let result = conn.insert(table, columns, rows) catch {
-    err => {
-      self.discard(conn)
-      raise err
-    }
-  }
+  errdefer self.discard(conn)
+  let result = conn.insert(table, columns, rows)
   self.release(conn)
   result
 }
@@ -175,16 +158,12 @@ pub async fn NativeConnectionPool::insert(
 pub async fn NativeConnectionPool::execute_stream(
   self : NativeConnectionPool,
   sql : String,
-  params? : Map[String, String] = Map([]),
+  params~ : Map[String, String] = Map([]),
 ) -> NativePooledCursor {
   let conn = self.acquire()
-  let cursor = conn.execute_stream(sql, params~) catch {
-    err => {
-      self.discard(conn)
-      raise err
-    }
-  }
-  { pool: self, cursor }
+  errdefer self.discard(conn)
+  let cursor = conn.execute_stream(sql, params~)
+  { pool: self, cursor, }
 }
 
 ///|
@@ -212,12 +191,7 @@ pub fn NativePooledCursor::columns(
 /// 关闭游标：读完剩余数据后把连接归还池；失败则丢弃连接。
 pub async fn NativePooledCursor::close(self : NativePooledCursor) -> Unit {
   let conn = self.cursor.conn
-  let result = self.cursor.close() catch {
-    err => {
-      self.pool.discard(conn)
-      raise err
-    }
-  }
+  errdefer self.pool.discard(conn)
+  self.cursor.close()
   self.pool.release(conn)
-  result
 }

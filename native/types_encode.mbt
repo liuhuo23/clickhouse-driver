@@ -175,7 +175,7 @@ fn write_default_value(buf : Buffer, type_name : String) -> Unit raise {
 
 ///|
 /// 解析无符号整数（错误时抛 ConnectionError）。
-fn parse_uint_value(value : String, type_name : String) -> UInt raise {
+fn parse_uint_value(value : String, type_name : String) -> UInt32 raise {
   @string.parse_uint(value) catch {
     _ =>
       raise @lib.DbError::connection_error(
@@ -186,7 +186,7 @@ fn parse_uint_value(value : String, type_name : String) -> UInt raise {
 
 ///|
 /// 解析有符号 32 位整数。
-fn parse_int_value(value : String, type_name : String) -> Int raise {
+fn parse_int_value(value : String, type_name : String) -> Int32 raise {
   @string.parse_int(value) catch {
     _ =>
       raise @lib.DbError::connection_error(
@@ -291,7 +291,7 @@ fn write_datetime64(
 
 ///|
 /// 解析 "YYYY-MM-DD" 为 (y, m, d)。
-fn parse_date_parts(value : String) -> (Int, Int, Int) raise {
+fn parse_date_parts(value : String) -> (Int32, Int32, Int32) raise {
   let parts = value.split("-")
   let arr = parts.to_array()
   if arr.length() != 3 {
@@ -308,7 +308,9 @@ fn parse_date_parts(value : String) -> (Int, Int, Int) raise {
 
 ///|
 /// 解析 "YYYY-MM-DD HH:MM:SS" 为 (y, m, d, hh, mm, ss)。
-fn parse_datetime_parts(value : String) -> (Int, Int, Int, Int, Int, Int) raise {
+fn parse_datetime_parts(
+  value : String,
+) -> (Int32, Int32, Int32, Int32, Int32, Int32) raise {
   let sp = value.find(" ")
   let (date_s, time_s) = match sp {
     Some(i) => (value[:i].to_owned(), value[i + 1:].to_owned())
@@ -330,7 +332,7 @@ fn parse_datetime_parts(value : String) -> (Int, Int, Int, Int, Int, Int) raise 
 
 ///|
 /// 严格解析整数（不抛底层异常，转为 ConnectionError）。
-fn parse_int_strict(s : StringView, field : String) -> Int raise {
+fn parse_int_strict(s : StringView, field : String) -> Int32 raise {
   @string.parse_int(s) catch {
     _ => raise @lib.DbError::connection_error("invalid \{field}: \{s}")
   }
@@ -338,14 +340,14 @@ fn parse_int_strict(s : StringView, field : String) -> Int raise {
 
 ///|
 /// 提取类型名中的数值参数（如 FixedString(8) → 8）。
-fn parse_type_size(type_name : String, prefix_len : Int) -> Int raise {
+fn parse_type_size(type_name : String, prefix_len : Int32) -> Int32 raise {
   let inner = type_name[prefix_len:type_name.length() - 1].trim()
   parse_int_strict(inner, "size")
 }
 
 ///|
 /// 提取 Decimal 精度。
-fn decimal_precision(type_name : String) -> Int raise {
+fn decimal_precision(type_name : String) -> Int32 raise {
   let comma = type_name.find(",").unwrap_or(type_name.length() - 1)
   let prec_s = type_name[10:comma].trim()
   parse_int_strict(prec_s, "precision")
@@ -353,7 +355,7 @@ fn decimal_precision(type_name : String) -> Int raise {
 
 ///|
 /// 公历 → 自 1970-01-01 的天数（Howard Hinnant 逆算法）。
-fn days_from_civil(y : Int, m : Int, d : Int) -> Int64 {
+fn days_from_civil(y : Int32, m : Int32, d : Int32) -> Int64 {
   let y = if m <= 2 { y - 1 } else { y }
   let era = (if y >= 0 { y } else { y - 399 }) / 400
   let yoe = (y - era * 400).to_int64() // [0, 399]
@@ -408,7 +410,7 @@ fn write_decimal(
 
 ///|
 /// 解析十进制字符串为缩放后的 BigInt。
-fn parse_decimal_string(value : String, scale : Int) -> @bigint.BigInt {
+fn parse_decimal_string(value : String, scale : Int32) -> @bigint.BigInt {
   let neg = value.has_prefix("-")
   let s = if neg { value[1:].to_owned() } else { value }
   let (int_s, frac_s) = match s.find(".") {
@@ -433,7 +435,7 @@ fn parse_decimal_string(value : String, scale : Int) -> @bigint.BigInt {
 
 ///|
 /// 写 BigInt 的小端字节（补码，固定长度）。
-fn write_big_le(buf : Buffer, big : @bigint.BigInt, nbytes : Int) -> Unit {
+fn write_big_le(buf : Buffer, big : @bigint.BigInt, nbytes : Int32) -> Unit {
   let zero = @bigint.BigInt::from_int(0)
   let modulus = @bigint.BigInt::from_int(1) << (nbytes * 8)
   let v = if big < zero { modulus + big } else { big }
@@ -514,7 +516,7 @@ fn write_enum(
   buf : Buffer,
   type_name : String,
   value : String,
-  byte_width : Int,
+  byte_width : Int32,
 ) -> Unit raise {
   let raw = enum_name_to_value(type_name, value)
   if raw == 0 && value != "0" && value != "0.0" {
@@ -543,7 +545,7 @@ fn write_enum(
 
 ///|
 /// 查 Enum 映射：名称 → 数值。
-fn enum_name_to_value(type_name : String, name : String) -> Int {
+fn enum_name_to_value(type_name : String, name : String) -> Int32 {
   let map = parse_enum_map(type_name)
   for entry in map {
     if entry.1 == name {

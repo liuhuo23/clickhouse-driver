@@ -5,8 +5,8 @@
 fn build_query_packet(
   client_name : String,
   sql : String,
-  compress? : Bool = false,
-  params? : Map[String, String] = Map([]),
+  compress~ : Bool = false,
+  params~ : Map[String, String] = Map([]),
 ) -> Bytes {
   let buf = Buffer::Buffer()
   write_varuint(buf, ClientPacket::Query.to_int().to_uint64())
@@ -83,10 +83,21 @@ fn build_empty_data_packet(compress : Bool) -> Bytes {
 /// 循环读取服务器包：Data 累积结果；Progress / ProfileInfo /
 /// ProfileEvents / Log / Totals / Extremes 读取后丢弃；Exception 映射为
 /// `DbError::ServerError`；EndOfStream 结束。
+///
+/// 受 `timeout_ms` 约束；超时后连接应 `close()`，不要继续复用。
 pub async fn NativeConnection::execute_query(
   self : NativeConnection,
   sql : String,
-  params? : Map[String, String] = Map([]),
+  params~ : Map[String, String] = Map([]),
+) -> @lib.ResultSet {
+  self.config.with_timeout(() => self.execute_query_impl(sql, params~))
+}
+
+///|
+async fn NativeConnection::execute_query_impl(
+  self : NativeConnection,
+  sql : String,
+  params~ : Map[String, String] = Map([]),
 ) -> @lib.ResultSet {
   flush_bytes(
     self.tcp,

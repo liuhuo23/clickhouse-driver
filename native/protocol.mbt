@@ -34,7 +34,7 @@ priv enum ClientPacket {
 }
 
 ///|
-fn ClientPacket::to_int(self : ClientPacket) -> Int {
+fn ClientPacket::to_int(self : ClientPacket) -> Int32 {
   match self {
     Hello => 0
     Query => 1
@@ -62,7 +62,7 @@ priv enum ServerPacket {
 }
 
 ///|
-fn ServerPacket::from_int(v : Int) -> ServerPacket raise {
+fn ServerPacket::from_int(v : Int32) -> ServerPacket raise {
   match v {
     0 => Hello
     1 => Data
@@ -105,7 +105,7 @@ fn write_uint16(buf : Buffer, v : UInt16) -> Unit {
 
 ///|
 /// 写入 32 位小端无符号整数（MoonBit 无 UInt32 类型，用 UInt 的低 32 位表达）。
-fn write_uint32(buf : Buffer, v : UInt) -> Unit {
+fn write_uint32(buf : Buffer, v : UInt32) -> Unit {
   buf.write_byte((v & 0xFF).to_byte())
   buf.write_byte(((v >> 8) & 0xFF).to_byte())
   buf.write_byte(((v >> 16) & 0xFF).to_byte())
@@ -114,7 +114,7 @@ fn write_uint32(buf : Buffer, v : UInt) -> Unit {
 
 ///|
 /// 写入 32 位小端有符号整数（补码）。
-fn write_int32(buf : Buffer, v : Int) -> Unit {
+fn write_int32(buf : Buffer, v : Int32) -> Unit {
   write_uint32(buf, v.reinterpret_as_uint())
 }
 
@@ -147,7 +147,7 @@ fn write_float64(buf : Buffer, v : Double) -> Unit {
 ///|
 /// 从 `bytes[offset:]` 解析一个 VarUInt，返回 `(值, 新 offset)`。
 /// 最多 10 字节；字节不足或溢出抛 `ConnectionError`。
-fn decode_varuint(bytes : Bytes, offset : Int) -> (UInt64, Int) raise {
+fn decode_varuint(bytes : Bytes, offset : Int32) -> (UInt64, Int32) raise {
   let mut result : UInt64 = 0
   let mut shift = 0
   let mut i = offset
@@ -168,7 +168,7 @@ fn decode_varuint(bytes : Bytes, offset : Int) -> (UInt64, Int) raise {
 
 ///|
 /// 从 `bytes[offset:]` 解析 16 位小端无符号整数。
-fn decode_uint16(bytes : Bytes, offset : Int) -> (UInt16, Int) raise {
+fn decode_uint16(bytes : Bytes, offset : Int32) -> (UInt16, Int32) raise {
   if offset + 2 > bytes.length() {
     raise @lib.DbError::connection_error("unexpected EOF decoding uint16")
   }
@@ -178,7 +178,7 @@ fn decode_uint16(bytes : Bytes, offset : Int) -> (UInt16, Int) raise {
 
 ///|
 /// 从 `bytes[offset:]` 解析 32 位小端无符号整数。
-fn decode_uint32(bytes : Bytes, offset : Int) -> (UInt, Int) raise {
+fn decode_uint32(bytes : Bytes, offset : Int32) -> (UInt32, Int32) raise {
   if offset + 4 > bytes.length() {
     raise @lib.DbError::connection_error("unexpected EOF decoding uint32")
   }
@@ -191,14 +191,14 @@ fn decode_uint32(bytes : Bytes, offset : Int) -> (UInt, Int) raise {
 
 ///|
 /// 从 `bytes[offset:]` 解析 32 位小端有符号整数（补码符号扩展）。
-fn decode_int32(bytes : Bytes, offset : Int) -> (Int, Int) raise {
+fn decode_int32(bytes : Bytes, offset : Int32) -> (Int32, Int32) raise {
   let (u, pos) = decode_uint32(bytes, offset)
   (u.reinterpret_as_int(), pos)
 }
 
 ///|
 /// 从 `bytes[offset:]` 解析 64 位小端无符号整数。
-fn decode_uint64(bytes : Bytes, offset : Int) -> (UInt64, Int) raise {
+fn decode_uint64(bytes : Bytes, offset : Int32) -> (UInt64, Int32) raise {
   if offset + 8 > bytes.length() {
     raise @lib.DbError::connection_error("unexpected EOF decoding uint64")
   }
@@ -211,21 +211,21 @@ fn decode_uint64(bytes : Bytes, offset : Int) -> (UInt64, Int) raise {
 
 ///|
 /// 从 `bytes[offset:]` 解析 64 位小端有符号整数。
-fn decode_int64(bytes : Bytes, offset : Int) -> (Int64, Int) raise {
+fn decode_int64(bytes : Bytes, offset : Int32) -> (Int64, Int32) raise {
   let (u, pos) = decode_uint64(bytes, offset)
   (u.reinterpret_as_int64(), pos)
 }
 
 ///|
 /// 从 `bytes[offset:]` 解析 32 位小端单精度浮点（IEEE-754）。
-fn decode_float32(bytes : Bytes, offset : Int) -> (Float, Int) raise {
+fn decode_float32(bytes : Bytes, offset : Int32) -> (Float, Int32) raise {
   let (u, pos) = decode_uint32(bytes, offset)
   (Float::reinterpret_from_uint(u), pos)
 }
 
 ///|
 /// 从 `bytes[offset:]` 解析 64 位小端双精度浮点（IEEE-754）。
-fn decode_float64(bytes : Bytes, offset : Int) -> (Double, Int) raise {
+fn decode_float64(bytes : Bytes, offset : Int32) -> (Double, Int32) raise {
   let (u, pos) = decode_uint64(bytes, offset)
   (u.reinterpret_as_double(), pos)
 }
@@ -272,7 +272,7 @@ pub async fn[R : @io.Reader] read_uint16(reader : R) -> UInt16 {
 
 ///|
 /// 从 reader 读取 32 位小端无符号整数。
-pub async fn[R : @io.Reader] read_uint32(reader : R) -> UInt {
+pub async fn[R : @io.Reader] read_uint32(reader : R) -> UInt32 {
   let bytes = reader.read_exactly(4)
   let (v, _) = decode_uint32(bytes, 0)
   v
@@ -280,7 +280,7 @@ pub async fn[R : @io.Reader] read_uint32(reader : R) -> UInt {
 
 ///|
 /// 从 reader 读取 32 位小端有符号整数。
-pub async fn[R : @io.Reader] read_int32(reader : R) -> Int {
+pub async fn[R : @io.Reader] read_int32(reader : R) -> Int32 {
   let bytes = reader.read_exactly(4)
   let (v, _) = decode_int32(bytes, 0)
   v

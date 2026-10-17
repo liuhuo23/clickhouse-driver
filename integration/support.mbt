@@ -2,7 +2,7 @@
 /// Keep package imports referenced in non-test source to avoid unused warnings.
 pub fn make_ci_conn(
   host~ : String,
-  port~ : Int,
+  port~ : Int32,
   user~ : String,
   password~ : String,
   database~ : String,

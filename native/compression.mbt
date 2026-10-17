@@ -13,7 +13,7 @@
 ///|
 /// LZ4 block 解压（标准 LZ4 block 格式，与 ClickHouse LZ4_compress_default
 /// 输出兼容）。
-fn lz4_decompress(src : Bytes, expected : Int) -> Bytes raise {
+fn lz4_decompress(src : Bytes, expected : Int32) -> Bytes raise {
   let out : Array[Byte] = []
   let mut ip = 0
   while ip < src.length() {

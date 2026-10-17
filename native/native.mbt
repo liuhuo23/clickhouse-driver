@@ -12,13 +12,14 @@
 /// 原生连接配置。
 pub struct NativeConfig {
   host : String
-  port : Int
+  port : Int32
   user : String
   password : String
   database : String
   client_name : String
-  /// 每次读写超时（毫秒）；`0` = 无超时（默认）。当前阶段未生效，后续阶段接入。
-  timeout_ms : Int
+  /// 每次公开操作（connect / ping / query / insert / cursor next）的超时
+  /// （毫秒）；`0` = 无超时（默认）。超时后连接停在半个数据包上，应关闭。
+  timeout_ms : Int32
   /// 是否启用 LZ4 压缩（原生协议压缩块，Data/Totals/Extremes 包）。
   compress : Bool
 }
@@ -30,15 +31,37 @@ pub struct NativeConfig {
 /// `"moonbit-clickhouse-native"`，`timeout_ms` 默认 `0`（无超时）。
 pub fn native_config(
   host~ : String,
-  port? : Int = 9000,
+  port~ : Int32 = 9000,
   user~ : String,
   password~ : String,
-  database? : String = "default",
-  client_name? : String = "moonbit-clickhouse-native",
-  timeout_ms? : Int = 0,
-  compress? : Bool = false,
+  database~ : String = "default",
+  client_name~ : String = "moonbit-clickhouse-native",
+  timeout_ms~ : Int32 = 0,
+  compress~ : Bool = false,
 ) -> NativeConfig {
-  { host, port, user, password, database, client_name, timeout_ms, compress }
+  { host, port, user, password, database, client_name, timeout_ms, compress, }
+}
+
+///|
+/// 在 `timeout_ms > 0` 时给一次完整操作加超时；超时映射为
+/// `ConnectionError`（与 HTTP 版语义一致）。
+///
+/// 超时意味着协议流停在半个数据包上，该连接不能再复用——调用方应
+/// `close()`；连接池路径会自动 discard。
+async fn[X] NativeConfig::with_timeout(
+  self : NativeConfig,
+  f : async () -> X,
+) -> X {
+  if self.timeout_ms <= 0 {
+    return f()
+  }
+  @async.with_timeout(self.timeout_ms, f) catch {
+    @async.TimeoutError =>
+      raise @lib.DbError::connection_error(
+        "native operation timed out after \{self.timeout_ms}ms",
+      )
+    err => raise err
+  }
 }
 
 ///|
@@ -53,7 +76,14 @@ pub struct NativeConnection {
 
 ///|
 /// 建立 TCP 连接并完成握手；任何阶段失败都会关闭 socket 并 raise `@lib.DbError`。
+///
+/// `config.timeout_ms > 0` 时整次建连 + 握手都受该超时约束。
 pub async fn connect(config : NativeConfig) -> NativeConnection {
+  config.with_timeout(() => connect_impl(config))
+}
+
+///|
+async fn connect_impl(config : NativeConfig) -> NativeConnection {
   let addr = @socket.Addr::resolve(config.host, port=config.port) catch {
     err =>
       raise @lib.DbError::connection_error(
@@ -66,6 +96,8 @@ pub async fn connect(config : NativeConfig) -> NativeConnection {
         "failed to connect to \{config.host}:\{config.port}: \{err}",
       )
   }
+  // 任何后续失败（握手/Addendum）都关闭 socket，避免泄露。
+  errdefer tcp.close()
   let hello = build_hello(
     config.client_name,
     config.database,
@@ -73,37 +105,25 @@ pub async fn connect(config : NativeConfig) -> NativeConnection {
     config.password,
   )
   flush_bytes(tcp, hello) catch {
-    err => {
-      tcp.close()
-      raise @lib.DbError::connection_error("failed to send hello: \{err}")
-    }
+    err => raise @lib.DbError::connection_error("failed to send hello: \{err}")
   }
-  let server = try {
-    let ptype = read_varuint(tcp)
-    match ServerPacket::from_int(ptype.to_int()) {
-      Hello => read_server_hello(tcp)
-      Exception => raise read_exception(tcp)
-      _ =>
-        raise @lib.DbError::connection_error(
-          "unexpected packet type during handshake: \{ptype}",
-        )
-    }
-  } catch {
-    err => {
-      tcp.close()
-      raise err
-    }
+  let ptype = read_varuint(tcp)
+  let server = match ServerPacket::from_int(ptype.to_int()) {
+    Hello => read_server_hello(tcp)
+    Exception => raise read_exception(tcp)
+    _ =>
+      raise @lib.DbError::connection_error(
+        "unexpected packet type during handshake: \{ptype}",
+      )
   }
   // ClickHouse 25.x 要求握手后发送 Addendum（quota_key）
   flush_bytes(tcp, build_addendum()) catch {
-    err => {
-      tcp.close()
+    err =>
       raise @lib.DbError::connection_error(
         "failed to send handshake addendum: \{err}",
       )
-    }
   }
-  { tcp, server, config, compress: config.compress }
+  { tcp, server, config, compress: config.compress, }
 }
 
 ///|
@@ -120,8 +140,13 @@ pub fn NativeConnection::server_timezone(self : NativeConnection) -> String {
 
 ///|
 /// 往返健康检查：发送 Ping 包并等待 Pong。
-/// 失败 raise `@lib.DbError`。
+/// 失败 raise `@lib.DbError`；受 `timeout_ms` 约束。
 pub async fn NativeConnection::ping(self : NativeConnection) -> Unit {
+  self.config.with_timeout(() => self.ping_impl())
+}
+
+///|
+async fn NativeConnection::ping_impl(self : NativeConnection) -> Unit {
   let buf = Buffer::Buffer()
   write_varuint(buf, ClientPacket::Ping.to_int().to_uint64())
   flush_bytes(self.tcp, buf.to_bytes())

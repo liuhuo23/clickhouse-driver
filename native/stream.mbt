@@ -6,7 +6,7 @@ pub struct NativeResultSetCursor {
   priv conn : NativeConnection
   priv cols : Array[Array[@lib.Column]]
   priv current : Array[Array[Array[String]]]
-  priv row_idx : Array[Int]
+  priv row_idx : Array[Int32]
   priv done : Array[Bool]
 }
 
@@ -18,10 +18,21 @@ pub struct NativeResultSetCursor {
 ///   while let Some(row) = cur.next() {
 ///     println(row.values)
 ///   }
+///
+/// 建立游标受 `timeout_ms` 约束；之后每次 `next()` / `close()` 也各自受限。
 pub async fn NativeConnection::execute_stream(
   self : NativeConnection,
   sql : String,
-  params? : Map[String, String] = Map([]),
+  params~ : Map[String, String] = Map([]),
+) -> NativeResultSetCursor {
+  self.config.with_timeout(() => self.execute_stream_impl(sql, params~))
+}
+
+///|
+async fn NativeConnection::execute_stream_impl(
+  self : NativeConnection,
+  sql : String,
+  params~ : Map[String, String] = Map([]),
 ) -> NativeResultSetCursor {
   flush_bytes(
     self.tcp,
@@ -102,8 +113,15 @@ async fn NativeResultSetCursor::prepare_first_block(
 }
 
 ///|
-/// 返回下一行；结果耗尽返回 `None`。
+/// 返回下一行；结果耗尽返回 `None`。每次调用受 `timeout_ms` 约束。
 pub async fn NativeResultSetCursor::next(
+  self : NativeResultSetCursor,
+) -> @lib.Row? {
+  self.conn.config.with_timeout(() => self.next_impl())
+}
+
+///|
+async fn NativeResultSetCursor::next_impl(
   self : NativeResultSetCursor,
 ) -> @lib.Row? {
   if self.done[0] {
@@ -178,7 +196,15 @@ pub fn NativeResultSetCursor::columns(
 
 ///|
 /// 关闭游标：把连接上剩余数据读取到 EndOfStream，以便连接复用。
+/// 受 `timeout_ms` 约束；超时则游标连接只能丢弃。
 pub async fn NativeResultSetCursor::close(self : NativeResultSetCursor) -> Unit {
+  self.conn.config.with_timeout(() => self.close_impl())
+}
+
+///|
+async fn NativeResultSetCursor::close_impl(
+  self : NativeResultSetCursor,
+) -> Unit {
   while !self.done[0] {
     let ptype = read_varuint(self.conn.tcp)
     match ServerPacket::from_int(ptype.to_int()) {

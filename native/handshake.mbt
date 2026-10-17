@@ -49,7 +49,7 @@ pub async fn[R : @io.Reader] read_server_hello(reader : R) -> ServerHello {
   if revision >= 54401 {
     version_patch = read_varuint(reader)
   }
-  { version_major: major, version_minor: minor, timezone, version_patch }
+  { version_major: major, version_minor: minor, timezone, version_patch, }
 }
 
 ///|

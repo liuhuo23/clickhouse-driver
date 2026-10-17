@@ -25,7 +25,7 @@ async fn[R : @io.Reader] read_value(reader : R, type_name : String) -> String {
     while end > 0 && bytes[end - 1].to_uint() == 0 {
       end = end - 1
     }
-    return @utf8.decode(bytes.view(start=0, end~))
+    return @utf8.decode(bytes.exact_view(start=0, end~))
   }
   if type_name.has_prefix("DateTime64(") {
     let scale = parse_type_param(type_name, "(")
@@ -103,18 +103,18 @@ async fn[R : @io.Reader] read_uuid(reader : R) -> String {
 fn format_uuid(lo : UInt64, hi : UInt64) -> String {
   let hex_chars = "0123456789abcdef"
   let out = Buffer::Buffer()
-  fn push_hex(buf : Buffer, v : UInt, shift : Int) -> Unit {
+  fn push_hex(buf : Buffer, v : UInt32, shift : Int32) -> Unit {
     let idx = ((v >> shift) & 0xF).reinterpret_as_int()
     buf.write_byte(hex_chars[idx].to_byte())
   }
-  fn push_u32(buf : Buffer, v : UInt) -> Unit {
+  fn push_u32(buf : Buffer, v : UInt32) -> Unit {
     let mut shift = 28
     while shift >= 0 {
       push_hex(buf, v, shift)
       shift = shift - 4
     }
   }
-  fn push_u16(buf : Buffer, v : UInt) -> Unit {
+  fn push_u16(buf : Buffer, v : UInt32) -> Unit {
     let mut shift = 12
     while shift >= 0 {
       push_hex(buf, v, shift)
@@ -142,7 +142,7 @@ fn format_uuid(lo : UInt64, hi : UInt64) -> String {
 
 ///|
 /// 读取 Int8（符号扩展）。
-async fn[R : @io.Reader] read_int8(reader : R) -> Int {
+async fn[R : @io.Reader] read_int8(reader : R) -> Int32 {
   let u = reader.read_exactly(1)[0].to_uint()
   if u >= 128 {
     u.reinterpret_as_int() - 256
@@ -153,7 +153,7 @@ async fn[R : @io.Reader] read_int8(reader : R) -> Int {
 
 ///|
 /// 读取 Int16（符号扩展）。
-async fn[R : @io.Reader] read_int16(reader : R) -> Int {
+async fn[R : @io.Reader] read_int16(reader : R) -> Int32 {
   let u = read_uint16(reader).to_uint()
   if u >= 32768 {
     u.reinterpret_as_int() - 65536
@@ -164,7 +164,7 @@ async fn[R : @io.Reader] read_int16(reader : R) -> Int {
 
 ///|
 /// 解析整数子串（仅限正数，用于 FixedString(N)/DateTime64(N)/Decimal(P,S)）。
-fn parse_int_inner(s : String) -> Int raise {
+fn parse_int_inner(s : String) -> Int32 raise {
   let mut v = 0
   for ch in s {
     if ch < '0' || ch > '9' {
@@ -177,7 +177,7 @@ fn parse_int_inner(s : String) -> Int raise {
 
 ///|
 /// 解析类型参数中的第一个整数（如 DateTime64(3) → 3）。
-fn parse_type_param(type_name : String, marker : String) -> Int raise {
+fn parse_type_param(type_name : String, marker : String) -> Int32 raise {
   let open = type_name.find(marker).unwrap_or(0)
   let comma = type_name.find(",").unwrap_or(type_name.length() - 1)
   let s = type_name[open + 1:comma].trim()
@@ -196,7 +196,7 @@ fn parse_type_param(type_name : String, marker : String) -> Int raise {
 async fn[R : @io.Reader] read_column_values(
   reader : R,
   type_name : String,
-  nrows : Int,
+  nrows : Int32,
 ) -> Array[String] {
   if type_name.has_prefix("Nullable(") {
     let inner = type_name[9:type_name.length() - 1].to_owned()
@@ -244,7 +244,7 @@ async fn[R : @io.Reader] read_column_values(
 async fn[R : @io.Reader] read_array_bulk(
   reader : R,
   inner : String,
-  nrows : Int,
+  nrows : Int32,
 ) -> Array[String] {
   let offsets : Array[Int64] = Array::make(nrows, 0L)
   for r in 0..<nrows {
@@ -278,7 +278,7 @@ async fn[R : @io.Reader] read_array_bulk(
 async fn[R : @io.Reader] read_tuple_bulk(
   reader : R,
   parts : Array[String],
-  nrows : Int,
+  nrows : Int32,
 ) -> Array[String] {
   let cols : Array[Array[String]] = Array::make(parts.length(), [])
   for i in 0..<parts.length() {
@@ -301,7 +301,7 @@ async fn[R : @io.Reader] read_map_bulk(
   reader : R,
   ktype : String,
   vtype : String,
-  nrows : Int,
+  nrows : Int32,
 ) -> Array[String] {
   let offsets : Array[Int64] = Array::make(nrows, 0L)
   for r in 0..<nrows {
@@ -379,7 +379,7 @@ fn split_top_level(s : String) -> Array[String] {
 async fn[R : @io.Reader] read_enum_value(
   reader : R,
   type_name : String,
-  byte_width : Int,
+  byte_width : Int32,
 ) -> String {
   let raw = if byte_width == 1 { read_int8(reader) } else { read_int16(reader) }
   let map = parse_enum_map(type_name)
@@ -393,12 +393,12 @@ async fn[R : @io.Reader] read_enum_value(
 
 ///|
 /// 解析 Enum 类型名中的 `'name' = value` 映射。
-fn parse_enum_map(type_name : String) -> Array[(Int, String)] {
+fn parse_enum_map(type_name : String) -> Array[(Int32, String)] {
   let open = type_name.find("(").unwrap_or(0)
   let close = type_name.length() - 1
   let inner = type_name[open + 1:close].to_owned()
   let entries = split_top_level(inner)
-  let result : Array[(Int, String)] = []
+  let result : Array[(Int32, String)] = []
   for entry in entries {
     let eq = entry.find("=")
     match eq {
@@ -441,7 +441,7 @@ async fn[R : @io.Reader] read_decimal(reader : R, type_name : String) -> String 
 /// 读取定长小端有符号大整数（Decimal128/256）。
 async fn[R : @io.Reader] read_decimal_big(
   reader : R,
-  nbytes : Int,
+  nbytes : Int32,
 ) -> @bigint.BigInt {
   let bytes = reader.read_exactly(nbytes)
   let rev = Buffer::Buffer(size_hint=nbytes)
@@ -462,7 +462,7 @@ async fn[R : @io.Reader] read_decimal_big(
 
 ///|
 /// 按小数位格式化 BigInt Decimal。
-fn format_big_decimal(big : @bigint.BigInt, scale : Int) -> String {
+fn format_big_decimal(big : @bigint.BigInt, scale : Int32) -> String {
   let zero = @bigint.BigInt::from_int(0)
   let negative = big < zero
   let abs = if negative { -big } else { big }
@@ -509,7 +509,7 @@ fn format_ipv4(bytes : Bytes) -> String {
 ///|
 /// IPv6：16 字节大端 → 标准压缩文本（如 `::1`）。
 fn format_ipv6(bytes : Bytes) -> String {
-  let groups : Array[Int] = Array::make(8, 0)
+  let groups : Array[Int32] = Array::make(8, 0)
   for i in 0..<8 {
     groups[i] = bytes[i * 2].to_int() * 256 + bytes[i * 2 + 1].to_int()
   }
@@ -561,7 +561,7 @@ fn format_ipv6(bytes : Bytes) -> String {
 }
 
 ///|
-fn hex_group(v : Int) -> String {
+fn hex_group(v : Int32) -> String {
   let hex_chars = "0123456789abcdef"
   if v == 0 {
     return "0"
@@ -592,7 +592,7 @@ fn civil_from_days(days : Int64) -> (Int64, Int64, Int64) {
 
 ///|
 /// 将整数补零为至少 `width` 位字符串（截断超过部分）。
-fn pad_int(v : Int64, width : Int) -> String {
+fn pad_int(v : Int64, width : Int32) -> String {
   let s = v.to_string()
   if s.length() >= width {
     return s
@@ -632,7 +632,7 @@ fn format_datetime(seconds : Int64) -> String {
 ///|
 /// 解析类型名中的时区（`DateTime('Asia/Shanghai')` / `DateTime64(3, 'Asia/Shanghai')`），
 /// 返回相对 UTC 的偏移（分钟）。未知时区按 0（UTC），文档注明 DST 用标准偏移近似。
-fn timezone_offset(type_name : String) -> Int {
+fn timezone_offset(type_name : String) -> Int32 {
   // 时区以单引号包裹（可能是 DateTime('tz') 或 DateTime64(3, 'tz')）；
   // 取最后一对引号内的内容
   let mut end = -1
@@ -728,7 +728,11 @@ fn timezone_offset(type_name : String) -> Int {
 
 ///|
 /// 带时区偏移的 DateTime64 格式化。
-fn format_datetime64_offset(v : Int64, scale : Int, offset_min : Int) -> String {
+fn format_datetime64_offset(
+  v : Int64,
+  scale : Int32,
+  offset_min : Int32,
+) -> String {
   let offset_sec = offset_min.to_int64() * 60
   if scale <= 0 {
     return format_datetime(v + offset_sec)
